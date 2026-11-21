@@ -3,7 +3,7 @@ import { compare, inferredEntries } from './graph.js';
 export const MAX_BYTES = 2 * 1024 * 1024;
 const MAX_NODES = 3000;
 const MAX_EDGES = 18000;
-const RESERVED = new Set(['__proto__', 'constructor', 'prototype']);
+const RESERVED = new Set(['__proto__']);
 const bad = message => { throw new Error(message); };
 const own = (object, key) => Object.hasOwn(object, key);
 const sorted = object => Object.keys(object).sort(compare);
@@ -140,7 +140,7 @@ function parseNpm(doc, source) {
   const links = new Map();
   for (const path of sorted(packages)) {
     const record = object(packages[path], 'npm package record');
-    if (path && (path.length > 1024 || /[\\:\u0000-\u0020\u007f]/u.test(path) ||
+    if (path && (path.length > 1024 || !path.isWellFormed() || /[\\:\u0000-\u0020\u007f]/u.test(path) ||
         path.split('/').some(part => !part || ['.', '..'].includes(part) || RESERVED.has(part)))) {
       bad('Invalid npm installation path.');
     }
@@ -189,7 +189,7 @@ function parseNpm(doc, source) {
       for (const name of sorted(deps)) {
         packageName(name, kind);
         const spec = string(deps[name], 'npm dependency specification');
-        if (kind === 'dependencies' && own(depMaps[3][1], name)) continue;
+        if (kind !== 'optionalDependencies' && own(depMaps[3][1], name)) continue;
         const meta = peerMeta[name];
         if (meta !== undefined) object(meta, 'peer metadata entry');
         if (meta?.optional !== undefined && typeof meta.optional !== 'boolean') bad('Invalid optional peer flag.');
@@ -258,7 +258,7 @@ function parseRequirements(text, source) {
     pending.length = 0;
     if (!line) continue;
     string(line.replaceAll('\t', ' '), `requirements line ${start}`, 8192);
-    const parts = /^(?<name>[\p{L}\p{N}][\p{L}\p{N}\p{M}._-]*)(?:\s*\[(?<extras>[a-z0-9._-]+(?:\s*,\s*[a-z0-9._-]+)*)\])?(?<rest>.*)$/iu.exec(line)?.groups;
+    const parts = /^(?<name>[\p{L}\p{N}][\p{L}\p{N}\p{M}._-]*)(?:\s*\[(?<extras>\s*[a-z0-9._-]+(?:\s*,\s*[a-z0-9._-]+)*\s*)\])?(?<rest>.*)$/iu.exec(line)?.groups;
     if (!parts) bad(`Unsupported requirements directive or entry on line ${start}.`);
     const name = packageName(parts.name, `requirements line ${start}`);
     const fields = parts.rest.trim().split(/\s+(?=--)/);
@@ -277,7 +277,9 @@ function parseRequirements(text, source) {
     let resolved = '';
     if (spec.startsWith('@')) {
       resolved = spec.slice(1).trim();
-      if (!/^(?:https?|git\+https?|file):[^\s]+$/i.test(resolved)) bad(`Unsupported direct reference on line ${start}.`);
+      if (!/^(?:https?|ftp|file|ssh|(?:git|hg|svn|bzr)\+[a-z0-9+.-]+):[^\s]+$/i.test(resolved)) {
+        bad(`Unsupported direct reference on line ${start}.`);
+      }
       try { new URL(resolved); } catch { bad(`Invalid direct reference on line ${start}.`); }
     } else if (spec) {
       if (spec.startsWith('(') && spec.endsWith(')')) spec = spec.slice(1, -1).trim();
@@ -432,13 +434,17 @@ const HASH_LENGTH = new Map([
   ['BLAKE2b-384', 96], ['BLAKE2b-512', 128], ['BLAKE3', 64],
 ]);
 
+const cleanText = value => typeof value === 'string' ?
+  value.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^/@\s]+@/g, '$1[credentials omitted]@') : value;
+
 function parseCyclone(doc, source) {
   if (doc.bomFormat !== 'CycloneDX' || doc.specVersion !== '1.5') bad('Only CycloneDX 1.5 JSON is supported.');
   if (!Number.isSafeInteger(doc.version) || doc.version < 1) bad('Invalid CycloneDX document version.');
   const metadata = fields(doc.metadata, 'CycloneDX metadata');
   const root = metadata.component === undefined ? null : object(metadata.component, 'CycloneDX root component');
   const { model, node, edge, infer, byId, unresolved } = modelBuilder('cyclonedx', source,
-    root ? string(root.name, 'CycloneDX root name', 250) : 'SBOM inventory', optional(root?.version, 'CycloneDX root version', 200));
+    root ? cleanText(string(root.name, 'CycloneDX root name', 250)) : 'SBOM inventory',
+    cleanText(optional(root?.version, 'CycloneDX root version', 200)));
   const refs = new Map();
   const links = [];
   let count = 0;
@@ -446,10 +452,10 @@ function parseCyclone(doc, source) {
     'device-driver', 'firmware', 'file', 'machine-learning-model', 'data']);
   function component(value, parent, isRoot = false) {
     const record = object(value, 'CycloneDX component');
-    const name = string(record.name, 'CycloneDX component name', 250);
+    const name = cleanText(string(record.name, 'CycloneDX component name', 250));
     if (!types.has(record.type)) bad('Invalid CycloneDX component type.');
-    const ref = optional(record['bom-ref'], 'CycloneDX bom-ref', 1024);
-    const purl = optional(record.purl, 'CycloneDX purl');
+    const ref = cleanText(optional(record['bom-ref'], 'CycloneDX bom-ref', 1024));
+    const purl = cleanText(optional(record.purl, 'CycloneDX purl'));
     if (ref && refs.has(ref)) bad('Duplicate CycloneDX bom-ref.');
     const ecosystem = /^pkg:(npm|pypi|cargo)\//.exec(purl)?.[1] ?? '';
     const hashes = items(record.hashes, 'CycloneDX hashes').map(item => {
@@ -461,10 +467,10 @@ function parseCyclone(doc, source) {
       return { alg: item.alg, content: item.content.toLowerCase() };
     });
     const id = isRoot ? model.rootId : ref ? `sbom:${ref}` : `sbom-inventory:${++count}`;
-    const group = optional(record.group, 'CycloneDX component group', 200);
+    const group = cleanText(optional(record.group, 'CycloneDX component group', 200));
     const details = {
       name: ecosystem === 'npm' && group.startsWith('@') && !name.startsWith('@') ? `${group}/${name}` : name,
-      version: optional(record.version, 'CycloneDX component version', 200), ecosystem,
+      version: cleanText(optional(record.version, 'CycloneDX component version', 200)), ecosystem,
       location: ref ? `bom-ref ${ref}` : 'CycloneDX component', purl, hashes, componentType: record.type,
     };
     if (isRoot) Object.assign(byId.get(id), details);
@@ -478,13 +484,13 @@ function parseCyclone(doc, source) {
   const rows = new Set();
   for (const value of items(doc.dependencies, 'CycloneDX dependencies')) {
     const row = object(value, 'CycloneDX dependency');
-    const ref = string(row.ref, 'CycloneDX dependency ref', 1024);
+    const ref = cleanText(string(row.ref, 'CycloneDX dependency ref', 1024));
     if (!refs.has(ref) || rows.has(ref)) bad('Unknown or duplicate CycloneDX dependency record.');
     rows.add(ref);
     for (const target of items(row.dependsOn, 'CycloneDX dependsOn')) {
-      string(target, 'CycloneDX dependency target', 1024);
-      if (refs.has(target)) edge(refs.get(ref), refs.get(target), byId.get(refs.get(target)).name);
-      else unresolved(refs.get(ref), target, 'bom-ref', '', `bom-ref ${ref}`, 'dependency');
+      const goal = cleanText(string(target, 'CycloneDX dependency target', 1024));
+      if (refs.has(goal)) edge(refs.get(ref), refs.get(goal), byId.get(refs.get(goal)).name);
+      else unresolved(refs.get(ref), goal, 'bom-ref', '', `bom-ref ${ref}`, 'dependency');
     }
   }
   if (!root || !root['bom-ref']) infer();
@@ -501,13 +507,12 @@ export function parseInput(text, filename = '') {
   const data = text.replace(/^\uFEFF/, '');
   const source = filename ? string(string(filename, 'file name', 1024).split(/[\\/]/).at(-1), 'file name', 250) : 'Imported file';
   const lower = source.toLowerCase();
-  if (lower === 'cargo.lock') return parseCargo(data, source);
-  if (lower.endsWith('.txt')) return parseRequirements(data, source);
   if (lower.endsWith('.json') || data.trimStart().startsWith('{')) {
     const doc = object(strictJson(data), 'JSON file');
     if (own(doc, 'bomFormat')) return parseCyclone(doc, source);
     if (own(doc, 'lockfileVersion')) return parseNpm(doc, source);
     bad('Unrecognized JSON inventory. Use npm package-lock or CycloneDX 1.5 JSON.');
   }
-  bad('Unrecognized file. Use package-lock.json, requirements.txt, Cargo.lock, or a CycloneDX JSON SBOM.');
+  if (lower.endsWith('.lock')) return parseCargo(data, source);
+  return parseRequirements(data, source);
 }

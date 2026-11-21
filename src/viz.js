@@ -30,8 +30,8 @@ function txt(x, y, str, cls, anchor) {
 }
 
 function clip(str, n) {
-  const s = String(str == null ? '' : str);
-  return s.length > n ? s.slice(0, n - 1) + '…' : s;
+  const chars = [...String(str == null ? '' : str)];
+  return chars.length > n ? chars.slice(0, n - 1).join('') + '…' : chars.join('');
 }
 
 function note(str) {
@@ -203,6 +203,31 @@ export function renderGraph(container, analysis, selectedId, onSelect) {
     svg.append(ln);
   }
 
+  /* Roving tabindex: one stop in the graph, arrows move by screen geometry,
+     Enter or Space activates. Home and End jump to the first and last node. */
+  const focusCells = [];
+  const moveFocus = (fromId, key) => {
+    const current = focusCells.find((cell) => cell.id === fromId);
+    if (!current) return;
+    let best = null;
+    let bestScore = Infinity;
+    for (const cell of focusCells) {
+      if (cell === current) continue;
+      const dx = cell.x - current.x;
+      const dy = cell.y - current.y;
+      let score = null;
+      if (key === 'ArrowRight' && dx > 0) score = dx * 8 + Math.abs(dy);
+      if (key === 'ArrowLeft' && dx < 0) score = -dx * 8 + Math.abs(dy);
+      if (key === 'ArrowDown' && dy > 0) score = dy * 8 + Math.abs(dx);
+      if (key === 'ArrowUp' && dy < 0) score = -dy * 8 + Math.abs(dx);
+      if (score !== null && score < bestScore) {
+        bestScore = score;
+        best = cell;
+      }
+    }
+    if (best) best.g.focus();
+  };
+
   for (const n of shown) {
     const p = pos.get(n.id);
     const r = sevOf.get(n.id);
@@ -218,7 +243,7 @@ export function renderGraph(container, analysis, selectedId, onSelect) {
       class: cls.join(' '),
       'data-node': n.id,
       role: 'button',
-      tabindex: '0',
+      tabindex: '-1',
       'aria-pressed': n.id === selectedId ? 'true' : 'false',
       transform: `translate(${p.x},${p.y})`,
     });
@@ -251,18 +276,34 @@ export function renderGraph(container, analysis, selectedId, onSelect) {
       (statusBits.length ? ' (' + statusBits.join(', ') + ')' : '');
     g.append(title);
 
+    focusCells.push({ id: n.id, x: p.x, y: p.y, g });
+
     const fire = () => {
       if (typeof onSelect === 'function') onSelect(n.id);
     };
     g.addEventListener('click', fire);
+    g.addEventListener('focus', () => {
+      for (const cell of focusCells) cell.g.setAttribute('tabindex', cell.g === g ? '0' : '-1');
+    });
     g.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
         fire();
+      } else if (e.key.startsWith('Arrow')) {
+        e.preventDefault();
+        moveFocus(n.id, e.key);
+      } else if (e.key === 'Home' || e.key === 'End') {
+        e.preventDefault();
+        const edge = e.key === 'Home' ? focusCells[0] : focusCells[focusCells.length - 1];
+        if (edge) edge.g.focus();
       }
     });
     svg.append(g);
   }
+
+  const initialFocus =
+    (selectedId != null && focusCells.find((cell) => cell.id === selectedId)) || focusCells[0];
+  if (initialFocus) initialFocus.g.setAttribute('tabindex', '0');
 
   container.append(svg);
 

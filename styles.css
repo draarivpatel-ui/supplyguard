@@ -223,7 +223,6 @@ input[type="text"], select{
   border-bottom-color: var(--lime);
 }
 .scenario-title{ font-weight: 600; font-size: 0.95rem; }
-.scenario-desc{ font-size: 0.8rem; color: var(--ink-dim); }
 .scenario-file{ font-family: var(--mono); font-size: 0.72rem; color: var(--ink-dim); }
 
 /* ---------- status strip ---------- */
@@ -493,6 +492,8 @@ input[type="text"], select{
 .rem-controls label{ display: block; font-size: 0.75rem; color: var(--ink-dim); }
 .rem-controls input{ width: 100%; margin-top: 3px; font-family: var(--mono); font-size: 0.85rem; }
 .rem-btns{ display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.rem-cell{ display: inline-flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.rem-reason{ margin: 0; font-size: 0.72rem; line-height: 1.35; color: var(--ink-dim); max-width: 220px; }
 .rem-btn{
   background: var(--paper-2);
   border: 1px solid var(--line-strong);

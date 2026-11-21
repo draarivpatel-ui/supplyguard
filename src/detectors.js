@@ -79,6 +79,7 @@ const canonicalName = (value, ecosystem) => ecosystem === 'pypi' ?
   value.toLowerCase().replace(/[-_.]+/g, '-') : value.toLowerCase();
 
 function typo(item) {
+  if (typeof item.name !== 'string' || !item.name) return null;
   const names = CORPUS[item.ecosystem];
   if (!names || item.name.startsWith('@')) return null;
   const name = canonicalName(item.name, item.ecosystem);
@@ -88,7 +89,7 @@ function typo(item) {
     return ['SG002', `The confusable skeleton matches ${visual}. This is a bounded Unicode mapping, not proof of impersonation.`];
   }
   const chars = [...name];
-  const candidates = names.filter(value => value.length >= 4 && Math.abs(value.length - chars.length) <= 1)
+  const candidates = names.filter(value => value.length >= 3 && chars.length >= 3 && Math.abs(value.length - chars.length) <= 1)
     .filter(value => damerauLevenshtein(name, value) === 1)
     .map(value => {
       const diff = [...value].flatMap((char, i) => char === chars[i] ? [] : [[char, chars[i]]]);
@@ -101,7 +102,7 @@ function typo(item) {
 
 const HASH_SIZE = { sha256: 32, sha384: 48, sha512: 64 };
 export function sriHashes(sri) {
-  if (!sri) return [];
+  if (typeof sri !== 'string' || !sri) return [];
   return sri.trim().split(/\s+/).flatMap(token => {
     const match = /^(sha256|sha384|sha512)-([A-Za-z0-9+/]+={0,2})(?:\?[!-~]+)?$/.exec(token);
     if (!match) return [];
@@ -123,10 +124,10 @@ export function sourceHost(resolved) {
   } catch { return ''; }
 }
 
-const download = /\b(?:curl|wget)\b[^|\r\n]{0,300}\|[ \t]*(?:(?:[A-Za-z0-9_./-]+\/)?(?:ba|da|z|k)?sh|node|python3?)(?=$|[\s;&])/i;
-const decode = /\b(?:base64\s+(?:-d|--decode)\b|atob\s*\(|FromBase64String\s*\()/i;
+const download = /\b(?:curl|wget)\b[^;\r\n]{0,600}?\|(?:\s*[^|;]{0,200}\|\s*)*(?:\s*(?:(?:sudo|doas|env|xargs|command|nohup|nice|ionice|stdbuf|timeout|busybox)(?:\s+\S+){0,3}|docker\s+run(?:\s+\S+){0,6}))*\s*(?:[A-Za-z0-9_./-]*\/)?(?:(?:ba|da|z|k|c|fi|tc)?sh|node|python[23]?|perl|ruby|php[0-9.]*|pwsh|powershell|deno|bun)(?=$|[\s;|&])/i;
+const decode = /\b(?:base64\s+(?:-d|--decode|-D)\b|atob\s*\(|FromBase64String\s*\(|b64decode\s*\(|certutil\s+(?:-\w+\s+)*-decode\b|openssl\s+enc\b[^;\r\n]{0,80}-(?:base64|d|a|A)\b|Buffer\s*\.\s*from\s*\([^)]{0,300}base64)/i;
 const sensitive = /\bprocess\s*(?:\.\s*env|\[\s*['"]env['"]\s*\])|(?:\.npmrc|\.ssh[/\\]|\.aws[/\\]credentials|credentials\.json)/i;
-const egress = /\b(?:curl|wget|fetch|XMLHttpRequest|https?\.(?:request|get))\b/i;
+const egress = /\b(?:curl|wget|fetch|XMLHttpRequest|https?\s*\.\s*(?:request|get))\b/i;
 const semver = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 function belowVersion(value, minimum) {
   if (!semver.test(value) || !semver.test(minimum)) return false;
@@ -160,9 +161,11 @@ function isPinned(edge, node) {
 }
 
 export function analyze(model) {
-  const active = model.nodes.filter(node => !node.quarantined);
+  const modelNodes = Array.isArray(model.nodes) ? model.nodes : [];
+  const modelEdges = Array.isArray(model.edges) ? model.edges : [];
+  const active = modelNodes.filter(node => !node.quarantined);
   const ids = new Set(active.map(node => node.id));
-  const edges = model.edges.filter(edge => ids.has(edge.from) && ids.has(edge.to));
+  const edges = modelEdges.filter(edge => ids.has(edge.from) && ids.has(edge.to));
   const { byId, outgoing, incoming } = indexGraph(active, edges);
   const { depths, predecessor } = breadthFirst(model.rootId, outgoing);
   const paths = new Map();
@@ -177,10 +180,11 @@ export function analyze(model) {
     declared.get(edge.to).push(edge);
   }
   for (const node of active) {
-    if (node.root || node.unresolved || !node.version || node.marker || !node.ecosystem) continue;
+    if (node.root || node.unresolved || !node.version || node.marker || !node.ecosystem || typeof node.name !== 'string') continue;
     const key = `${node.ecosystem}:${canonicalName(node.name, node.ecosystem)}`;
     if (!versions.has(key)) versions.set(key, new Set());
-    versions.get(key).add(node.version);
+    versions.get(key).add(node.ecosystem === 'pypi' ?
+      node.version.replace(/^\d+(?:\.\d+)*/, match => match.replace(/(?:\.0+)+$/, '')) : node.version);
   }
   for (const node of active) {
     const path = trace(node.id, predecessor);
@@ -207,20 +211,22 @@ export function analyze(model) {
       continue;
     }
     if (node.unresolved) { add('SG014', 'The declared reference has no matching component record in this input.'); continue; }
+    if (typeof node.name !== 'string') continue;
     const lookalike = node.local ? null : typo(node);
     if (lookalike) add(...lookalike);
-    if (node.hasInstallScript || node.hooks.length) {
-      const names = [...new Set(node.hooks.map(hook => hook.name))].sort(compare);
+    const hooks = Array.isArray(node.hooks) ? node.hooks : [];
+    if (node.hasInstallScript || hooks.length) {
+      const names = [...new Set(hooks.map(hook => hook.name))].sort(compare);
       add('SG003', names.length ? `Recorded lifecycle phases: ${names.join(', ')}. Script text was not executed.` :
         'The lockfile sets hasInstallScript; it does not supply the script body.');
-      if (node.hooks.some(hook => download.test(hook.text))) add('SG004', 'A hook contains a downloader token followed by a pipe into an interpreter token.');
-      if (node.hooks.some(hook => decode.test(hook.text))) add('SG005', 'A hook contains a decoding token. Its content was not decoded or executed.');
-      if (node.hooks.some(hook => sensitive.test(hook.text) && egress.test(hook.text))) {
+      if (hooks.some(hook => typeof hook?.text === 'string' && download.test(hook.text))) add('SG004', 'A hook contains a downloader token followed by a pipe into an interpreter token.');
+      if (hooks.some(hook => typeof hook?.text === 'string' && decode.test(hook.text))) add('SG005', 'A hook contains a decoding token. Its content was not decoded or executed.');
+      if (hooks.some(hook => typeof hook?.text === 'string' && sensitive.test(hook.text) && egress.test(hook.text))) {
         add('SG006', 'Credential-related and egress-related text occur in the same hook. No data flow was verified.');
       }
     }
     const host = sourceHost(node.resolved);
-    if (model.format === 'npm' && !node.local && !node.bundled && !hasSHA512(node.integrity)) {
+    if (model.format === 'npm' && !node.local && !node.bundled && !node.simulatedArtifact && !hasSHA512(node.integrity)) {
       add('SG007', 'No syntactically valid SHA-512 SRI digest is recorded. No artifact bytes were verified.');
     }
     if ((model.format === 'npm' && !node.local && node.resolved && host !== 'registry.npmjs.org') ||
@@ -260,14 +266,17 @@ export function analyze(model) {
     .map(({ ruleId, nodeId, points }) => ({ ruleId, nodeId, points }));
   const score = Math.min(100, contributions.reduce((sum, item) => sum + item.points, 0));
   return { score, findings, paths, depths, contributions, model, metrics: {
-    nodes: active.length - 1, edges: edges.length, flagged: flagged.size, affected: affectedUnion.size,
+    nodes: Math.max(0, active.length - 1), edges: edges.length, flagged: flagged.size, affected: affectedUnion.size,
     reachable: [...depths.keys()].filter(id => id !== model.rootId && !byId.get(id).unresolved).length,
     maxDepth: Math.max(0, ...depths.values()),
   } };
 }
 
 export function simulate(original, changes) {
-  const byId = new Map(original.nodes.map(node => [node.id, node]));
+  if (!changes || typeof changes[Symbol.iterator] !== 'function') {
+    throw new Error('Remediation changes must be an iterable of node and change pairs.');
+  }
+  const byId = new Map((Array.isArray(original.nodes) ? original.nodes : []).map(node => [node.id, node]));
   const pins = new Map();
   const nodes = new Map();
   for (const [id, change] of changes) {
@@ -284,6 +293,7 @@ export function simulate(original, changes) {
     if (change.action === 'upgrade') {
       if (node.ecosystem !== 'npm') throw new Error('Candidate artifact upgrades are supported for npm. Use quarantine for other inventories.');
       if (version === node.version) throw new Error('Enter a different candidate version.');
+      if (belowVersion(version, node.version)) throw new Error('Enter a version newer than the recorded one.');
       const integrity = change.integrity?.trim() ?? '';
       if (integrity && !hasSHA512(integrity)) throw new Error('Enter a valid SHA-512 SRI digest or leave it empty.');
       nodes.set(id, { ...node, version, integrity, hasInstallScript: false, hooks: [], expectedIntegrity: '',

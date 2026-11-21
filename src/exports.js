@@ -16,7 +16,7 @@ export function canonicalJson(value) {
 
 export function csvCell(value) {
   let text = String(value ?? '');
-  if (/^[\s\uFEFF]*[=+\-@＝＋－＠]/u.test(text) || /^[\t\r\n]/.test(text)) text = `'${text}`;
+  if (/^[\s\uFEFF\p{Cf}]*[=+\-@＝＋－＠]/u.test(text) || /^[\t\r\n]/.test(text)) text = `'${text}`;
   return `"${text.replaceAll('"', '""')}"`;
 }
 
@@ -32,25 +32,31 @@ function hashesFor(node) {
 
 function evidenceBundle(analysis, inputFingerprint, changes) {
   const { model, score, metrics, findings, contributions } = analysis;
-  const nodes = model.nodes.map(node => ({
+  const byId = new Map((Array.isArray(model.nodes) ? model.nodes : []).map(node => [node.id, node]));
+  const nodes = (Array.isArray(model.nodes) ? model.nodes : []).map(node => ({
     id: node.id, name: node.name, version: node.version, ecosystem: node.ecosystem, location: node.location,
     recordedHost: sourceHost(node.resolved), hashes: hashesFor(node), root: Boolean(node.root),
     unresolved: Boolean(node.unresolved), quarantined: Boolean(node.quarantined),
     ...(node.marker ? { marker: node.marker } : {}),
   })).sort((a, b) => compare(a.id, b.id));
-  const edges = model.edges.map(({ from, to, name, spec, kind }) =>
+  const edges = (Array.isArray(model.edges) ? model.edges : []).map(({ from, to, name, spec, kind }) =>
     ({ from, to, name, spec: /:\/\/|^(?:git(?:\+|@)|file:|link:)/i.test(spec) ? '[direct source omitted]' : spec, kind }))
     .sort((a, b) => compare(canonicalJson(a), canonicalJson(b)));
   return {
     version: 1, format: model.format, source: model.source, sourceKind: model.sourceKind,
     scenario: model.scenario ?? null, rootId: model.rootId,
     inputSha256: validDigest(inputFingerprint),
-    notes: [reportNote, ...model.notes],
+    notes: [reportNote, ...(Array.isArray(model.notes) ? model.notes : [])],
     score, metrics, findings, contributions, nodes, edges,
-    changes: [...(changes ?? [])].map(([nodeId, change]) => ({
-      nodeId, action: change.action, ...(typeof change.version === 'string' ? { version: change.version } : {}),
-      ...(typeof change.integrity === 'string' && change.integrity ? { hashes: sriHashes(change.integrity) } : {}),
-    })).sort((a, b) => compare(a.nodeId, b.nodeId)),
+    changes: [...(changes ?? [])].flatMap(([nodeId, change]) => {
+      if (!change || typeof change !== 'object' || typeof change.action !== 'string') return [];
+      const version = typeof change.version === 'string' && change.version ? change.version
+        : change.action === 'pin' ? byId.get(nodeId)?.version : undefined;
+      return [{
+        nodeId, action: change.action, ...(version ? { version } : {}),
+        ...(typeof change.integrity === 'string' && change.integrity ? { hashes: sriHashes(change.integrity) } : {}),
+      }];
+    }).sort((a, b) => compare(a.nodeId, b.nodeId)),
   };
 }
 
@@ -108,8 +114,9 @@ function cyclonedx(analysis, bundle, fingerprint) {
   function component(node) {
     const hashes = hashesFor(node);
     const name = node.ecosystem === 'pypi' ? node.name.toLowerCase().replace(/[-_.]+/g, '-') : node.name;
-    const purl = /^(?:npm|cargo|pypi)$/.test(node.ecosystem) && node.version && /^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+$/i.test(name)
-      ? `pkg:${node.ecosystem}/${name.split('/').map(encodeURIComponent).join('/')}@${encodeURIComponent(node.version)}` : '';
+    const purlName = node.ecosystem === 'npm' ? name.toLowerCase() : name;
+    const purl = /^(?:npm|cargo|pypi)$/.test(node.ecosystem) && node.version && /^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+$/i.test(purlName)
+      ? `pkg:${node.ecosystem}/${purlName.split('/').map(encodeURIComponent).join('/')}@${encodeURIComponent(node.version)}` : '';
     return {
       type: node.componentType ?? (node.root ? 'application' : 'library'), 'bom-ref': ref.get(node.id), name: node.name,
       ...(node.version ? { version: node.version } : {}), ...(hashes.length ? { hashes } : {}),

@@ -112,7 +112,9 @@ function loadScenario(id) {
       fingerprintPromise: sha256(model.inputText).catch(() => null),
     })
   ) {
-    setStatus('Loaded scenario ' + preset.title + ' (synthetic demonstration data).');
+    setStatus(
+      'Loaded scenario ' + preset.title + ' (synthetic demonstration data). ' + (preset.description || '')
+    );
   }
 }
 
@@ -220,10 +222,25 @@ function selectNode(id, opts) {
   for (const row of els.findings.querySelectorAll('tr[data-node]')) {
     row.classList.toggle('selected', row.dataset.node === id);
   }
-  if (els.componentSelect && nodeById.has(id)) els.componentSelect.value = id;
-  if (opts && opts.refocus) {
-    const b = els.graph.querySelector('[data-node="' + (window.CSS ? CSS.escape(id) : id) + '"]');
-    if (b) b.focus();
+  if (els.componentSelect) {
+    els.componentSelect.value = id != null && nodeById.has(id) ? id : '';
+  }
+  if (opts && opts.refocus && id != null) {
+    let target = null;
+    if (window.CSS && CSS.escape) {
+      try {
+        target = els.graph.querySelector('[data-node="' + CSS.escape(id) + '"]');
+      } catch (_) {}
+    }
+    if (!target) {
+      for (const g of els.graph.querySelectorAll('[data-node]')) {
+        if (g.getAttribute('data-node') === id) {
+          target = g;
+          break;
+        }
+      }
+    }
+    if (target) target.focus();
   }
 }
 
@@ -503,16 +520,22 @@ function renderRemediation(host, node) {
       quarantine: node.root ? 'The root component cannot be remediated.' : '',
     };
     const makeBtn = (act, label) => {
+      const cell = el('span', 'rem-cell');
       const b = el('button', 'rem-btn', label);
       b.type = 'button';
       b.dataset.remediation = act;
+      cell.append(b);
       if (reasons[act]) {
         b.disabled = true;
         b.title = reasons[act];
+        const reason = el('p', 'rem-reason', reasons[act]);
+        reason.id = 'rem-reason-' + act;
+        b.setAttribute('aria-describedby', reason.id);
+        cell.append(reason);
       } else {
         b.addEventListener('click', () => stageRemediation(node, act));
       }
-      return b;
+      return cell;
     };
 
     const cur = state.changes.get(node.id);
@@ -791,7 +814,6 @@ function applyTheme(mode) {
   if (mode === 'auto') root.removeAttribute('data-theme');
   else root.setAttribute('data-theme', mode);
   els.themeToggle.textContent = 'Theme: ' + mode;
-  els.themeToggle.setAttribute('aria-pressed', String(mode !== 'auto'));
   try {
     localStorage.setItem('supplyguard-theme', mode);
   } catch (_) {}
@@ -807,7 +829,7 @@ function buildScenarioButtons() {
     b.dataset.preset = p.id;
     b.setAttribute('aria-pressed', 'false');
     b.append(el('span', 'scenario-title', p.title));
-    if (p.description) b.append(el('span', 'scenario-desc', p.description));
+    if (p.description) b.setAttribute('aria-label', p.title + '. ' + p.description);
     if (p.file) b.append(el('span', 'scenario-file', p.file));
     b.addEventListener('click', () => loadScenario(p.id));
     els.scenarios.append(b);
@@ -873,7 +895,7 @@ function init() {
   }
 
   els.componentSelect.addEventListener('change', () => {
-    if (els.componentSelect.value) selectNode(els.componentSelect.value);
+    selectNode(els.componentSelect.value || null);
   });
 
   for (const b of document.querySelectorAll('[data-export]')) {
@@ -891,14 +913,23 @@ function init() {
   } catch (_) {}
   applyTheme(THEME_MODES.includes(stored) ? stored : 'auto');
 
-  els.shortcutsBtn.addEventListener('click', () => {
-    state.shortcuts = !state.shortcuts;
-    els.shortcutsBtn.setAttribute('aria-pressed', String(state.shortcuts));
-    els.shortcutsBtn.textContent = 'Keyboard shortcuts ' + (state.shortcuts ? 'on' : 'off');
-    els.shortcutHint.textContent = state.shortcuts
+  function setShortcuts(on) {
+    state.shortcuts = on;
+    els.shortcutsBtn.setAttribute('aria-pressed', String(on));
+    els.shortcutsBtn.textContent = 'Keyboard shortcuts ' + (on ? 'on' : 'off');
+    els.shortcutHint.textContent = on
       ? 'Shortcuts on: f focuses the severity filter, g focuses the component menu.'
       : '';
-  });
+    try {
+      localStorage.setItem('supplyguard-shortcuts', on ? 'on' : 'off');
+    } catch (_) {}
+  }
+  els.shortcutsBtn.addEventListener('click', () => setShortcuts(!state.shortcuts));
+  let storedShortcuts = 'off';
+  try {
+    storedShortcuts = localStorage.getItem('supplyguard-shortcuts') || 'off';
+  } catch (_) {}
+  setShortcuts(storedShortcuts === 'on');
   document.addEventListener('keydown', onKeydown);
 
   if ((presets || []).length) {

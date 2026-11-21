@@ -98,7 +98,8 @@ try {
     await call('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
   }
   async function key(value) {
-    await call('Input.dispatchKeyEvent', { type: 'keyDown', key: value, text: value });
+    const printable = value.length === 1;
+    await call('Input.dispatchKeyEvent', { type: 'keyDown', key: value, ...(printable ? { text: value } : {}) });
     await call('Input.dispatchKeyEvent', { type: 'keyUp', key: value });
   }
   const getFile = name => until(async () => {
@@ -170,6 +171,32 @@ try {
       await click('#findings th:nth-of-type(2) button');
       assert.equal(await dom('#findings th:nth-of-type(2)', 'el => el.getAttribute("aria-sort")'), 'ascending');
 
+      // Accessibility regressions: visible disable reasons, roving tabindex,
+      // live count, cycle-button naming, scenario labels, skip target, deselect.
+      await click('#graph [data-node="root"]');
+      const reasons = await evaluate('[...document.querySelectorAll("#inspector .rem-reason")].map(p => p.textContent)');
+      assert.ok(reasons.length >= 3 && reasons.every(text => /root component cannot be remediated/i.test(text)),
+        'disabled remediation actions show their reasons as text');
+      assert.ok(await evaluate('[...document.querySelectorAll("#inspector .rem-btn:disabled[data-remediation]")].every(b => { const ref = b.getAttribute("aria-describedby"); return ref && document.getElementById(ref); })'),
+        'disabled buttons reference their reason');
+      assert.equal(await evaluate('document.querySelectorAll("#graph svg [data-node][tabindex=\'0\']").length'), 1,
+        'graph exposes a single roving tab stop');
+      await key('ArrowRight');
+      assert.notEqual(await evaluate('document.activeElement.getAttribute("data-node")'), 'root',
+        'arrow key moves graph focus');
+      assert.equal(await evaluate('document.activeElement.tagName'), 'g');
+      assert.equal(await evaluate('document.querySelectorAll("#graph svg [data-node][tabindex=\'0\']").length'), 1,
+        'roving tabindex stays single');
+      assert.equal(await dom('#findings-count', 'el => el.getAttribute("aria-live")'), 'polite');
+      assert.equal(await dom('#theme-toggle', 'el => el.getAttribute("aria-pressed")'), null,
+        'theme cycle is not announced as a binary toggle');
+      assert.match(await dom('[data-preset="lifecycle"]', 'el => el.getAttribute("aria-label")'), /install-hook/);
+      await evaluate('document.querySelector(".skip").click()');
+      assert.equal(await evaluate('document.activeElement.id'), 'findings-heading', 'skip link lands focus');
+      await evaluate('const sel = document.querySelector("#component-select"); sel.value = ""; sel.dispatchEvent(new Event("change"))');
+      assert.equal(await evaluate('document.querySelectorAll("#graph svg .selected").length'), 0,
+        'placeholder option clears the selection');
+
       for (const kind of ['sarif', 'cyclonedx', 'csv', 'audit']) await click(`[data-export="${kind}"]`);
       const audit = JSON.parse(await getFile('supplyguard.audit.json'));
       assert.match(audit.evidence.inputSha256, /^[a-f0-9]{64}$/);
@@ -190,6 +217,13 @@ try {
       await importFile('package-lock.json', '{"__proto__":{"field":"value"}}');
       await waitFor('document.querySelector("#status").textContent.includes("Reserved key")', 'hostile file rejected');
       await score(4);
+      await importFile('yarn.lock', '# yarn lockfile v1\n"dep@1":\n  version "1"\n');
+      await waitFor('document.querySelector("#status").textContent.includes("Cargo TOML")', 'unsupported lockfile rejected with a Cargo message');
+      await score(4);
+      await importFile('requirements', requirements);
+      await score(4);
+      await until(async () => (await evaluate('document.querySelector("#provenance").textContent')).includes('requirements'),
+        'extensionless requirements file imported');
       await click('[data-export="audit"]');
       await until(async () => JSON.parse(await getFile('supplyguard.audit.json')).evidence.format === 'pypi', 'new audit download');
       assert.equal(JSON.parse(await getFile('supplyguard.audit.json')).evidence.inputSha256, await sha256(requirements));

@@ -32,7 +32,11 @@ export function breadthFirst(start, adjacency) {
 export function trace(id, predecessor) {
   if (!predecessor.has(id)) return null;
   const path = [];
-  for (let current = id; current !== null; current = predecessor.get(current)) path.push(current);
+  const seen = new Set();
+  for (let current = id; current != null && !seen.has(current); current = predecessor.get(current)) {
+    seen.add(current);
+    path.push(current);
+  }
   return path.reverse();
 }
 

