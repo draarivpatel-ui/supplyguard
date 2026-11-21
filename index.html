@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; worker-src 'none'">
+<meta name="color-scheme" content="dark light">
+<title>SupplyGuard</title>
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="stylesheet" href="./styles.css">
+<script type="module" src="./src/app.js"></script>
+</head>
+<body>
+<a class="skip" href="#findings-heading">Skip to findings</a>
+<header class="topbar">
+  <div class="brand">
+    <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <rect x="1.5" y="1.5" width="21" height="21" rx="3" class="mark-frame"></rect>
+      <path d="M8.6 7.9 15.2 11.2M15.4 12.9 8.8 16.1" class="mark-trace"></path>
+      <circle cx="7" cy="7" r="2" class="mark-a"></circle>
+      <circle cx="17" cy="12" r="2" class="mark-b"></circle>
+      <circle cx="7" cy="17" r="2" class="mark-c"></circle>
+    </svg>
+    <h1 class="wordmark">SupplyGuard</h1>
+  </div>
+  <div class="top-actions">
+    <div class="exports" role="group" aria-label="Export analysis">
+      <button type="button" data-export="sarif">SARIF</button>
+      <button type="button" data-export="cyclonedx">CycloneDX</button>
+      <button type="button" data-export="csv">CSV</button>
+      <button type="button" data-export="audit">Audit</button>
+    </div>
+    <button type="button" id="print-button">Print brief</button>
+    <button id="theme-toggle" type="button" aria-pressed="false">Theme: auto</button>
+    <button id="shortcuts" type="button" aria-pressed="false">Keyboard shortcuts off</button>
+  </div>
+</header>
+<main>
+  <section class="scenario-strip" aria-label="Scenario selectors">
+    <div id="scenarios"></div>
+  </section>
+
+  <section class="status-strip" aria-label="Analysis status">
+    <div class="import" id="drop-zone">
+      <label class="import-label" for="file-input">Import file</label>
+      <input id="file-input" type="file" accept=".json,.txt,.lock">
+      <p class="drop-hint">or drop a lockfile or dependency list here, up to 2 MB</p>
+    </div>
+    <div class="risk">
+      <output id="risk-score" aria-label="Risk score"></output>
+      <span class="risk-word">risk score</span>
+      <p id="baseline-compare" class="compare"></p>
+    </div>
+    <dl id="metrics" class="metrics"></dl>
+    <div class="notices">
+      <p id="provenance" class="provenance"></p>
+      <details class="coverage-notes"><summary>Input and evidence notes</summary><ul id="warnings" class="warnings"></ul></details>
+      <p id="status" role="status" aria-live="polite" class="status"></p>
+    </div>
+  </section>
+
+  <section class="workspace" aria-label="Dependency graph and inspector">
+    <div class="graph-panel">
+      <div class="graph-toolbar">
+        <h2>Dependency graph</h2>
+        <label class="component-jump">Component
+          <select id="component-select" aria-label="Select a component to inspect"></select>
+        </label>
+      </div>
+      <div class="graph-scroll" tabindex="0" aria-label="Dependency graph, scrollable">
+        <div id="graph" aria-label="Dependency graph"></div>
+      </div>
+      <ul class="legend" aria-label="Graph legend">
+        <li><span class="lg lg-root"></span>root component</li>
+        <li><span class="lg lg-line"></span>highlighted trace</li>
+        <li><span class="lg lg-high"></span>high severity</li>
+        <li><span class="lg lg-med"></span>medium</li>
+        <li><span class="lg lg-low"></span>low</li>
+        <li><span class="lg lg-unreached"></span>unreachable</li>
+        <li><span class="lg lg-quar"></span>quarantined</li>
+      </ul>
+    </div>
+    <aside id="inspector" class="inspector" aria-label="Component inspector"></aside>
+  </section>
+
+  <section class="findings-panel" aria-labelledby="findings-heading">
+    <div class="findings-head">
+      <h2 id="findings-heading">Findings</h2>
+      <div id="severity-filter" role="group" aria-label="Filter findings by severity">
+        <button type="button" data-filter="all" aria-pressed="true">All</button>
+        <button type="button" data-filter="high" aria-pressed="false">High</button>
+        <button type="button" data-filter="medium" aria-pressed="false">Medium</button>
+        <button type="button" data-filter="low" aria-pressed="false">Low</button>
+      </div>
+    </div>
+    <p id="findings-count" class="findings-count"></p>
+    <div class="table-scroll">
+      <div id="findings"></div>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <p>SupplyGuard reports heuristic signals from dependency metadata. A finding does not confirm that a vulnerable code path executes. Preset scenarios are synthetic demonstration data.</p>
+    <p id="shortcut-hint" class="shortcut-hint"></p>
+  </footer>
+</main>
+
+<section id="print-brief" aria-label="Executive brief"></section>
+</body>
+</html>

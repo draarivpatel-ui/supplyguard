@@ -1,0 +1,11 @@
+{
+  "name": "supplyguard",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test --test-reporter=spec test/*.test.js",
+    "serve": "python3 -m http.server 4173 --bind 127.0.0.1"
+  }
+}
