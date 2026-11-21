@@ -1,0 +1,11 @@
+SupplyGuard is a static workbench for dependency risk. It reads a lockfile or a requirement list, scores heuristic signals, draws the dependency graph, and exports SARIF, CycloneDX, CSV, and audit reports, all generated from local files. Everything runs offline in the browser, with zero external requests and no runtime dependencies. The bundled scenarios are synthetic demonstration data, and the interface labels them as such.
+
+Here is the Lifecycle hijack scenario. snapshot-codec sits three levels below the root on the highlighted trace, reached through ui-gateway and render-adapter. It carries four rule signals at once, a recorded postinstall hook, a downloader piped into a shell, a base64 decode token, and credential plus egress text, each with a recommendation.
+
+The inspector shows the evidence for each signal and the four affected dependents behind them. The hook text is synthetic and never executes. Analysis is deterministic rules over metadata. It never installs a package or runs a hook, and a finding does not confirm a vulnerable path runs.
+
+Quarantine the component and the simulation rewrites the graph. The highlighted path disappears, snapshot-codec drops into the unreachable column, and reachability recalculates around it. Nothing is installed, fetched, or executed. It is a counterfactual edit of the record, not a real quarantine.
+
+Reset restores the baseline. In Lookalike names, a lodash spelled with a Cyrillic o trips the Unicode confusable rule at high severity. recat and axips sit one edit away from react and axios and trip the edit-distance rule instead. Same findings table, two different telltale signals.
+
+The workbench is verified end to end, deterministic and offline. 280 Node tests pass, and 10 of 10 report samples validate against the official SARIF 2.1.0 and CycloneDX 1.5 schemas. Export the audit JSON. Then open the executive brief for the one-page summary. SupplyGuard puts the risk in the graph, not in a guess.
