@@ -6,6 +6,8 @@ and exports SARIF, CycloneDX, CSV, and audit reports. Everything runs in
 the browser from local files: no external network requests, no install
 step, no build step.
 
+**Live demo:** [https://aariv.me/supplyguard/](https://aariv.me/supplyguard/)
+
 ## Run
 
 ```
