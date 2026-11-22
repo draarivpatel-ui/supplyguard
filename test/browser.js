@@ -6,12 +6,20 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { SELF_TEST_COUNT } from '../src/attest.js';
 import { sha256 } from '../src/exports.js';
+
+let checks = 0;
+for (const name of ['equal', 'ok', 'match', 'deepEqual', 'notEqual', 'doesNotMatch', 'strictEqual', 'notStrictEqual']) {
+  const fn = assert[name];
+  if (typeof fn === 'function') assert[name] = (...args) => { checks++; return fn(...args); };
+}
 
 const root = new URL('../', import.meta.url);
 const assets = new Map([
   ['index.html', 'text/html'], ['favicon.svg', 'image/svg+xml'], ['styles.css', 'text/css'],
-  ...['parsers', 'graph', 'detectors', 'exports', 'presets', 'viz', 'app'].map(name => [`src/${name}.js`, 'text/javascript']),
+  ...['parsers', 'graph', 'detectors', 'exports', 'presets', 'viz', 'policy', 'diff', 'attest', 'sha256', 'app']
+    .map(name => [`src/${name}.js`, 'text/javascript']),
 ]);
 const server = createServer(async (req, res) => {
   const path = new URL(req.url, 'http://127.0.0.1').pathname;
@@ -124,7 +132,7 @@ try {
   await call('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: scratch });
   await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] });
   const presets = [['lifecycle', 72], ['lookalikes', 59], ['scope', 89], ['baseline', 0]];
-  for (const [width, height, mobile] of [[1280, 800, false], [390, 844, true]]) {
+  for (const [width, height, mobile] of [[1440, 900, false], [390, 844, true]]) {
     await call('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile });
     await call('Page.navigate', { url: `${origin}/supplyguard/` });
     await score(72);
@@ -208,7 +216,82 @@ try {
       const pdf = await call('Page.printToPDF', { printBackground: true, preferCSSPageSize: true });
       const pages = Buffer.from(pdf.data, 'base64').toString('latin1').match(/\/Type\s*\/Page\b/g);
       assert.equal(pages?.length, 1, 'executive brief fits one page');
+
+      // Workbench: blast-radius preview, policy gate arc, lockfile diff,
+      // self-tests, signed attestation, and bookmark reload (all offline).
+      await click(codec);
+      await until(async () => (await evaluate('document.querySelector(".blast-stats")?.textContent ?? ""'))
+        .includes('transitive dependents'), 'blast stats render');
+      assert.match(await dom('.blast-stats', 'el => el.textContent'), /exposure paths1 . depth 3direct dependents1transitive dependents4/);
+      await click('#blast-preview');
+      await until(async () => (await evaluate('document.querySelector(".blast-delta")?.textContent ?? ""'))
+        .includes('score'), 'blast report renders');
+      const blast = await dom('.blast-delta', 'el => el.textContent');
+      assert.match(blast, /72 . 0/, 'quarantine preview reports 72 to 0');
+      assert.match(blast, /4 contributing findings cleared . 1 orphaned/);
+
+      await click('[data-tab="policy"]');
+      assert.equal(await dom('.gate-verdict', 'el => el.textContent'), 'BLOCK', 'lifecycle gate blocks');
+      assert.equal(await evaluate('document.querySelectorAll("#panel-policy tr[data-check]").length'), 5, 'five gate checks');
+      const gateSelect = async (id, value) => evaluate(`(() => { const s = document.querySelector('tr[data-check="${id}"] .gate-select'); if (!s) throw new Error('no gate select ${id}'); s.value = ${JSON.stringify(value)}; s.dispatchEvent(new Event('change')); return s.value; })()`);
+      assert.equal(await gateSelect('severity-ceiling', 'off'), 'off');
+      assert.equal(await dom('.gate-verdict', 'el => el.textContent'), 'BLOCK', 'install-script rule still blocks');
+      await gateSelect('install-scripts', 'warn');
+      assert.equal(await dom('.gate-verdict', 'el => el.textContent'), 'WARN', 'warned hook rule downgrades to warn');
+      await gateSelect('install-scripts', 'off');
+      assert.equal(await dom('.gate-verdict', 'el => el.textContent'), 'PASS', 'all-off rules pass');
+      await gateSelect('install-scripts', 'block');
+      assert.equal(await dom('.gate-verdict', 'el => el.textContent'), 'BLOCK', 'restored block level blocks');
+      assert.equal(await dom('.gate-chip', 'el => el.textContent'), 'gate BLOCK', 'status strip mirrors the gate');
+
+      await click('[data-tab="diff"]');
+      await click('#diff-run');
+      await until(async () => (await evaluate('document.querySelector(".diff-sum")?.textContent ?? ""'))
+        .includes('net risk delta +72'), 'diff delta renders');
+      assert.match(await dom('.diff-sum', 'el => el.textContent'), /findings 0 . 4 . reachable 11 . 11/);
+      const groups = await evaluate('[...document.querySelectorAll(".diff-group h3")].map(h => h.textContent)');
+      assert.deepEqual(groups, ['Added (0)', 'Removed (0)', 'Changed (0)', 'Newly introduced risk signals (4)', 'Resolved signals (0)']);
+      await click('#diff-swap');
+      await click('#diff-run');
+      await until(async () => (await evaluate('document.querySelector(".diff-sum")?.textContent ?? ""'))
+        .includes('net risk delta -72'), 'swapped diff inverts the delta');
+      await click('#diff-swap');
+
+      await click('[data-tab="verify"]');
+      await click('#run-selftests');
+      await until(async () => /self-tests pass/.test(await evaluate('document.querySelector(".st-count")?.textContent ?? ""')),
+        'self-test summary renders');
+      assert.match(await dom('.st-count', 'el => el.textContent'), new RegExp(`${SELF_TEST_COUNT} of ${SELF_TEST_COUNT} self-tests pass`));
+      assert.equal(await evaluate('document.querySelectorAll(".selftest-list li").length'), SELF_TEST_COUNT);
+      assert.equal(await evaluate('document.querySelectorAll(".selftest-list .st-fail").length'), 0, 'no failing self-tests');
+
+      await click('[data-export="sign"]');
+      const attestText = await getFile('supplyguard.attestation.json');
+      const attestDoc = JSON.parse(attestText);
+      assert.match(attestDoc.sha256, /^[0-9a-f]{64}$/);
+      assert.equal(attestDoc.attestation, 'supplyguard-attestation');
+      assert.equal(attestDoc.gate.verdict, 'BLOCK');
+      await evaluate(`(() => { const a = document.querySelector('#attest-input'); a.value = ${JSON.stringify(attestText)}; a.dispatchEvent(new Event('input')); })()`);
+      await click('#verify-attest');
+      assert.match(await dom('.attest-result', 'el => el.textContent'), /^verified . gate BLOCK . sha256/, 'fresh attestation verifies in page');
+      const tampered = attestText.replace('"version":1', '"version":2');
+      await evaluate(`(() => { const a = document.querySelector('#attest-input'); a.value = ${JSON.stringify(tampered)}; a.dispatchEvent(new Event('input')); })()`);
+      await click('#verify-attest');
+      assert.match(await dom('.attest-result', 'el => el.textContent'), /^not verified:/, 'tampered attestation rejected');
+
       await call('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+      const hash = await evaluate('location.hash');
+      assert.match(hash, /^#audit=[A-Za-z0-9_-]{4,}$/, 'bookmark hash is synced');
+      await call('Page.navigate', { url: `${origin}/supplyguard/${hash}` });
+      await score(72);
+      assert.equal(await evaluate('location.hash.startsWith("#audit=")'), true, 'hash survives reload');
+      assert.equal(await dom('[data-tab="verify"]', 'el => el.getAttribute("aria-selected")'), 'true', 'bookmark restores the verify tab');
+      assert.equal(await evaluate('document.querySelector(\'tr[data-check="severity-ceiling"] .gate-select\')?.value'), 'off',
+        'bookmark restores the configured policy');
+      await click('[data-export="md"]');
+      const report = await getFile('supplyguard.report.md');
+      assert.match(report, /# SupplyGuard audit report/);
+      assert.match(report, /Policy gate: BLOCK/);
     } else {
       const requirements = '\uFEFF# sample\nnumpy==2.1.0\nurllib3>=2\n';
       await importFile('requirements.txt', requirements);
@@ -233,6 +316,22 @@ try {
       }));
       await waitFor(`document.querySelector("#graph svg").textContent.includes(${JSON.stringify(literal)})`, 'hostile markup rendered as text');
       assert.equal(await evaluate('document.querySelector(".probe")'), null);
+      await click('[data-tab="diff"]');
+      await evaluate(`(() => {
+        for (const [id, v] of [['#diff-left', 'preset:baseline'], ['#diff-right', 'preset:lifecycle']]) {
+          const s = document.querySelector(id); s.value = v; s.dispatchEvent(new Event('change'));
+        }
+      })()`);
+      await click('#diff-run');
+      await until(async () => (await evaluate('document.querySelector(".diff-sum")?.textContent ?? ""'))
+        .includes('net risk delta +72'), 'mobile diff renders');
+      await click('[data-tab="verify"]');
+      await click('#run-selftests');
+      await until(async () => /self-tests pass/.test(await evaluate('document.querySelector(".st-count")?.textContent ?? ""')),
+        'mobile self-tests render');
+      assert.equal(await evaluate('document.querySelectorAll(".selftest-list .st-fail").length'), 0);
+      assert.match(await dom('.gate-chip', 'el => el.textContent'), /gate (PASS|WARN|BLOCK)/);
+      assert.equal(await evaluate('document.documentElement.scrollWidth'), 390, 'workbench panels fit mobile width');
       if (process.argv.includes('--capture')) {
         await click('[data-preset="lifecycle"]');
         await score(72);
@@ -241,10 +340,16 @@ try {
     }
     console.log(`${width}x${height}: presets, pointer hit tests, graph and layout verified`);
   }
-  const uncaught = events.filter(event => event.method === 'Runtime.exceptionThrown' ||
-    (event.method === 'Runtime.consoleAPICalled' && event.params.type === 'error') ||
-    (event.method === 'Log.entryAdded' && event.params.entry.level === 'error') ||
-    (event.method === 'Network.loadingFailed' && !event.params.canceled));
+  // ERR_INTERNET_DISCONNECTED is the harness's own offline emulation, not an app fault.
+  const uncaught = events.filter(event => {
+    if (event.method === 'Runtime.exceptionThrown') return true;
+    if (event.method === 'Runtime.consoleAPICalled' && event.params.type === 'error' &&
+        !/ERR_INTERNET_DISCONNECTED/.test(JSON.stringify(event.params.args ?? []))) return true;
+    if (event.method === 'Log.entryAdded' && event.params.entry.level === 'error' &&
+        !/ERR_INTERNET_DISCONNECTED/.test(event.params.entry.text)) return true;
+    return event.method === 'Network.loadingFailed' && !event.params.canceled &&
+      event.params.errorText !== 'net::ERR_INTERNET_DISCONNECTED';
+  });
   assert.deepEqual(uncaught.map(event => event.params), [], 'zero browser errors');
   const requests = events.filter(event => event.method === 'Network.requestWillBeSent').map(event => event.params.request.url);
   assert.ok(requests.every(url => url.startsWith(`${origin}/supplyguard/`) || url.startsWith(`blob:${origin}/`)),
@@ -254,7 +359,7 @@ try {
       await copyFile(join(scratch, file), new URL(`../docs/${file}`, import.meta.url));
     }
   }
-  console.log('Remediation, filter/sort, shortcut guards, import rejection, four downloads, and one-page print verified; zero browser errors.');
+  console.log(`Remediation, filter/sort, shortcut guards, import rejection, downloads, one-page print, policy gate, lockfile diff, self-tests, attestation verify/tamper, and bookmark reload verified; zero browser errors. ${checks} checks passed.`);
 } finally {
   socket?.close();
   server.close();

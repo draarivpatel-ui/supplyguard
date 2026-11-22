@@ -38,7 +38,14 @@ inspector, then a sortable findings table. In the inspector, remediation
 actions sit immediately under the severity badges; artifact metadata and
 the long evidence trail collapse into disclosures below. Under 1080px the
 workspace stacks; the graph keeps its own horizontal scroll and the
-document never overflows horizontally.
+document never overflows horizontally. A workbench row sits under the
+findings table: a tablist (Policy gate, Lockfile diff, Verify) with
+roving tabindex and `aria-selected`, each panel on the same grid.
+Gate verdicts reuse evidence colors: coral for BLOCK, amber for WARN,
+lime for PASS; check rows tint the same scale. Diff tables mark
+direction with plain glyphs (up/down arrows, tilde, plus, minus) rather
+than new color channels, and the attestation and self-test results use
+the standard pass/fail text colors.
 
 ## Rules honored
 

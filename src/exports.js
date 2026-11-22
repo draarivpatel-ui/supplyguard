@@ -30,7 +30,7 @@ function hashesFor(node) {
   return [...found.entries()].sort((a, b) => compare(a[0], b[0])).map(([, hash]) => hash);
 }
 
-function evidenceBundle(analysis, inputFingerprint, changes) {
+export function evidenceBundle(analysis, inputFingerprint, changes) {
   const { model, score, metrics, findings, contributions } = analysis;
   const byId = new Map((Array.isArray(model.nodes) ? model.nodes : []).map(node => [node.id, node]));
   const nodes = (Array.isArray(model.nodes) ? model.nodes : []).map(node => ({
@@ -165,8 +165,39 @@ function csv(bundle, fingerprint) {
   return `${rows.map(row => row.map(csvCell).join(',')).join('\r\n')}\r\n`;
 }
 
-export async function makeExport(kind, analysis, { inputFingerprint, changes } = {}) {
-  if (!['sarif', 'cyclonedx', 'csv', 'audit'].includes(kind)) throw new Error('Unknown export kind.');
+/* Untrusted names/versions reach these cells, so also neutralize the
+   characters that would smuggle raw HTML or link syntax into the report. */
+const mdCell = value => String(value ?? '')
+  .replaceAll('\\', '\\\\').replaceAll('|', '\\|')
+  .replaceAll('<', '\\<').replaceAll('>', '\\>')
+  .replaceAll('[', '\\[').replaceAll(']', '\\]')
+  .replaceAll('`', '\\`')
+  .replace(/[\r\n]+/g, ' ');
+
+function markdown(bundle, fingerprint, gate) {
+  const byId = new Map(bundle.nodes.map(node => [node.id, node]));
+  const metrics = Object.entries(bundle.metrics ?? {}).map(([key, value]) => `| ${mdCell(key)} | ${mdCell(value)} |`);
+  const lines = [
+    '# SupplyGuard audit report', '',
+    `Source: ${mdCell(bundle.source)} · Format: ${mdCell(bundle.format)} · Scenario: ${mdCell(bundle.scenario ?? 'none')} · Risk score: ${bundle.score}/100`,
+    ...(gate ? [`Policy gate: ${gate}`] : []), '',
+    '## Metrics', '', '| metric | value |', '| --- | --- |', ...metrics, '',
+    `## Findings (${bundle.findings.length})`, '',
+    '| rule | severity | component | depth | points | evidence |', '| --- | --- | --- | --- | --- | --- |',
+    ...bundle.findings.map(item => `| ${item.ruleId} | ${item.severity} | ${mdCell(byId.get(item.nodeId)?.name ?? item.nodeId)} | ${
+      item.depth ?? 'no path'} | ${item.points} | ${mdCell(item.evidence)} |`),
+    '', '## Provenance', '',
+    `- input sha256: ${bundle.inputSha256 ?? 'not recorded'}`,
+    `- audit sha256: ${fingerprint}`,
+    `- ${reportNote}`,
+    '- Offline deterministic static analysis. No registry, advisory feed, or network lookup was performed.',
+    '',
+  ];
+  return lines.join('\n');
+}
+
+export async function makeExport(kind, analysis, { inputFingerprint, changes, gate } = {}) {
+  if (!['sarif', 'cyclonedx', 'csv', 'audit', 'md'].includes(kind)) throw new Error('Unknown export kind.');
   // Capture the entire export synchronously before waiting for its digest.
   const bundle = evidenceBundle(analysis, inputFingerprint, changes);
   const fingerprint = await sha256(canonicalJson(bundle));
@@ -175,6 +206,7 @@ export async function makeExport(kind, analysis, { inputFingerprint, changes } =
     cyclonedx: () => [json(cyclonedx(analysis, bundle, fingerprint)), 'supplyguard.cdx.json', 'application/vnd.cyclonedx+json'],
     csv: () => [csv(bundle, fingerprint), 'supplyguard.csv', 'text/csv;charset=utf-8'],
     audit: () => [`${canonicalJson({ auditSha256: fingerprint, evidence: bundle })}\n`, 'supplyguard.audit.json', 'application/json'],
+    md: () => [markdown(bundle, fingerprint, gate), 'supplyguard.report.md', 'text/markdown;charset=utf-8'],
   }[kind]();
   return { text, filename, mime, fingerprint, sha256: await sha256(text) };
 }

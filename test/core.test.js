@@ -560,3 +560,33 @@ test('shipped text contains no banned typography, smooth scrolling, or tool attr
     }
   }
 });
+
+test('npm import: many missing optional deps on a deep path stay fast', () => {
+  const deep = 'a/' + 'x/'.repeat(500) + 'node_modules/holder';
+  const optional = Object.fromEntries(Array.from({ length: 50000 }, (_, i) => [`missing-${i}`, '1.0.0']));
+  const start = Date.now();
+  const parsed = lock(npm({ '': {}, [deep]: { version: '1.0.0', optionalDependencies: optional } }));
+  assert.ok(parsed.nodes.length >= 2);
+  assert.ok(Date.now() - start < 1000, 'deep optional-dep import took ' + (Date.now() - start) + 'ms');
+});
+
+test('npm import: sibling prefixes do not shadow when a folder has no parent slash', () => {
+  const parsed = lock(npm({
+    '': {},
+    'app/node_modules/react': { version: '17.0.0' },
+    'apps/web/node_modules/holder': { version: '1.0.0', dependencies: { react: '18.0.0' } },
+  }));
+  const edge = parsed.edges.find(item => item.name === 'react');
+  assert.match(edge?.to ?? '', /^missing:/, 'react must resolve to a missing marker, not the app sibling');
+});
+
+test('npm import: a dep scoped like node_modules resolves through an earlier boundary', () => {
+  const parsed = lock(npm({
+    '': { dependencies: { x: '1.0.0' } },
+    'node_modules/x': { version: '1.0.0', dependencies: { '@s/node_modules': '1.0.0' } },
+    'node_modules/@s/node_modules': { link: true, resolved: 'packages/lib' },
+    'packages/lib': { version: '1.0.0' },
+  }));
+  const edge = parsed.edges.find(item => item.name === '@s/node_modules');
+  assert.equal(edge?.to, 'npm:packages/lib');
+});

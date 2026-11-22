@@ -1,10 +1,12 @@
 # SupplyGuard
 
-A static, fully offline dependency-risk instrument. It parses a lockfile or
+A static, fully offline dependency-risk workbench. It parses a lockfile or
 requirement list, scores heuristic signals, renders the dependency graph,
-and exports SARIF, CycloneDX, CSV, and audit reports. Everything runs in
-the browser from local files: no external network requests, no install
-step, no build step.
+previews quarantine blast radius, evaluates a deterministic CI/CD policy
+gate, diffs two inventories, and exports SARIF, CycloneDX, CSV, Markdown,
+audit, and SHA-256 attestation reports. Everything runs in the browser
+from local files: no external network requests, no install step, no build
+step.
 
 **Live demo:** [https://aariv.me/supplyguard/](https://aariv.me/supplyguard/)
 
@@ -26,8 +28,11 @@ under a subpath such as a project page.
 nice -n 15 npm test
 ```
 
-Requires Node 22 or later. `core.test.js` covers the engine. Two optional
-checks cover the rest:
+Requires Node 22 or later. The suite is split across `core.test.js`
+(engine), `policy.test.js` (gate, blast radius, exposure paths),
+`diff.test.js` (version ordering, inventory comparison), and
+`attest.test.js` (SHA-256, canonical JSON, CSV safety, attestation,
+bookmarks). Two optional checks cover the rest:
 
 - `node test/browser.js` drives the UI in Chrome. Set `CHROME_PATH` to a
   Chrome binary when it is not found automatically.
@@ -48,6 +53,38 @@ checks cover the rest:
 - CycloneDX 1.5 JSON components and dependency references. This is not a
   full-schema importer.
 
+## Workbench
+
+- **Policy gate**: five deterministic checks (install hooks, lookalike
+  count, unpinned declarations, severity ceiling, license denylist) over
+  reachable findings only. Each rule is off, warn, or block, and the
+  verdict resolves to PASS, WARN, or BLOCK. No advisory feed or registry
+  is consulted; the same inputs always produce the same verdict.
+- **Blast radius**: the inspector lists a component's direct and
+  transitive dependents plus its shortest exposure paths from the root.
+  Preview quarantine reports the counterfactual score delta, cleared
+  contributing findings, and orphaned components without staging a
+  change.
+- **Lockfile diff**: compare two scenarios, the current analysis, or
+  pasted inventories. Reports added, removed, upgraded, downgraded,
+  equivalent, pinned, unpinned, mixed, expanded, and reduced version
+  sets; the net risk delta; and newly
+  introduced or resolved signals.
+- **Attestation**: a SHA-256 digest over the canonical evidence bundle,
+  policy, and gate verdict. The Verify panel recomputes the digest
+  in-page and rejects payloads that no longer match it. The digest is
+  unkeyed, so it detects corruption or casual edits only when compared
+  against a copy kept elsewhere; it is not an identity signature and
+  not a vulnerability scan.
+- **Self-tests**: the Verify panel replays engine proofs (FIPS 180-4
+  vectors, cycle-safe BFS paths, diff anti-symmetry, gate determinism,
+  CSV neutralization, tamper detection) on synthetic input.
+- **Bookmarking**: the preset scenario, its staged changes, gate
+  configuration, active tab, and diff sources serialize into `#audit=`
+  so a review link restores the same deterministic state. Imported file
+  content and pasted diff text are never
+  stored in the URL.
+
 ## Limits
 
 - Inputs are capped at 2 MiB, 3000 components, and 18000 dependency edges.
@@ -65,6 +102,18 @@ checks cover the rest:
   reflect missing metadata, not verified safety.
 - Preset scenarios are synthetic demonstration data, labeled as such in
   the interface.
+- The attestation digest is unkeyed: anyone who edits the payload can
+  recompute it, so in-page verification detects corruption, not forgery.
+  Comparing the digest to a copy kept elsewhere is what proves a payload
+  is unaltered; it is never signature validation.
+- The lockfile diff compares parsed models, not raw text; two lockfiles
+  that produce the same component graph diff as identical.
+- The license denylist only inspects license metadata present in the
+  input. The npm and Cargo parsers never read licenses, so on those
+  inputs the check reports zero coverage and can never trigger; the
+  gate does not pretend to have checked. CycloneDX is the supported
+  license source, so the check reports its
+  coverage alongside the verdict.
 
 ## Layout
 
@@ -75,4 +124,10 @@ checks cover the rest:
 - `src/parsers.js`, `src/detectors.js`, `src/presets.js`, `src/exports.js`,
   `src/graph.js`: parsing, scoring, scenarios, export writers, and graph
   helpers.
+- `src/policy.js`: exposure paths, dependents, blast-radius reports, and
+  the policy gate.
+- `src/diff.js`: version ordering and the inventory and signal comparator.
+- `src/attest.js`: attestation, the bookmark codec, and the self-test
+  catalog.
+- `src/sha256.js`: pure-JavaScript SHA-256 (FIPS 180-4).
 - `test/`: engine test suite.

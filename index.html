@@ -28,8 +28,11 @@
       <button type="button" data-export="sarif">SARIF</button>
       <button type="button" data-export="cyclonedx">CycloneDX</button>
       <button type="button" data-export="csv">CSV</button>
+      <button type="button" data-export="md">Markdown</button>
       <button type="button" data-export="audit">Audit</button>
+      <button type="button" data-export="sign">Attestation</button>
     </div>
+    <button type="button" id="bookmark-button">Bookmark link</button>
     <button type="button" id="print-button">Print brief</button>
     <button id="theme-toggle" type="button">Theme: auto</button>
     <button id="shortcuts" type="button" aria-pressed="false">Keyboard shortcuts off</button>
@@ -97,6 +100,17 @@
     <div class="table-scroll">
       <div id="findings"></div>
     </div>
+  </section>
+
+  <section class="workbench" aria-label="Analysis workbench">
+    <div class="tab-bar" role="tablist" aria-label="Workbench tools">
+      <button type="button" role="tab" id="tab-policy" data-tab="policy" aria-controls="panel-policy" aria-selected="true">Policy gate</button>
+      <button type="button" role="tab" id="tab-diff" data-tab="diff" aria-controls="panel-diff" aria-selected="false" tabindex="-1">Lockfile diff</button>
+      <button type="button" role="tab" id="tab-verify" data-tab="verify" aria-controls="panel-verify" aria-selected="false" tabindex="-1">Verify</button>
+    </div>
+    <div id="panel-policy" role="tabpanel" aria-labelledby="tab-policy" tabindex="0"></div>
+    <div id="panel-diff" role="tabpanel" aria-labelledby="tab-diff" tabindex="0" hidden></div>
+    <div id="panel-verify" role="tabpanel" aria-labelledby="tab-verify" tabindex="0" hidden></div>
   </section>
 
   <footer class="foot">

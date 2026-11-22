@@ -168,16 +168,59 @@ function parseNpm(doc, source) {
     });
   }
   for (const target of links.values()) if (!records.has(target) || !target) bad('Unsupported npm workspace link target.');
-  function lookup(path, name) {
-    let scope = path ? path.split('/') : [];
-    while (true) {
-      const candidate = [...scope, 'node_modules', name].join('/');
-      if (links.has(candidate)) return `npm:${links.get(candidate)}`;
-      if (records.has(candidate)) return `npm:${candidate}`;
-      if (!scope.length) return null;
-      const modules = scope.lastIndexOf('node_modules');
-      scope = scope.slice(0, modules < 0 ? -1 : modules);
+  /* Dependency resolution walks each install path's ancestors; doing it as
+     string joins per dep name is quadratic on deep paths with many missing
+     optional deps (which never create nodes, so the component cap cannot
+     bound them). Index installs once by containing folder, and cache each
+     record's ancestor-prefix list. */
+  const byParent = new Map(); // containing folder -> Map<installed name, node id>
+  const nmBoundary = dir => {
+    let i = dir.lastIndexOf('node_modules');
+    while (i > 0) {
+      if (dir[i - 1] === '/' && (dir[i + 12] === '/' || i + 12 === dir.length)) return i;
+      i = dir.lastIndexOf('node_modules', i - 1);
     }
+    return i === 0 && (dir[12] === '/' || dir.length === 12) ? 0 : -1;
+  };
+  /* A dep name can itself contain a '/' (scoped names), so every
+     node_modules segment boundary is a valid decomposition, not just the
+     last one; candidates matching earlier boundaries must still resolve. */
+  const addInstall = (full, id) => {
+    for (let i = full.indexOf('node_modules'); i !== -1; i = full.indexOf('node_modules', i + 1)) {
+      if (i > 0 && full[i - 1] !== '/') continue;
+      if (full[i + 12] !== '/') continue;
+      const name = full.slice(i + 13);
+      if (!name) continue;
+      const dir = i === 0 ? '' : full.slice(0, i - 1);
+      let bucket = byParent.get(dir);
+      if (!bucket) byParent.set(dir, bucket = new Map());
+      bucket.set(name, id);
+    }
+  };
+  for (const [path] of records) addInstall(path, `npm:${path}`);
+  for (const [path, target] of links) addInstall(path, `npm:${target}`); // links override records
+  const walks = new Map();
+  const walk = path => {
+    let prefixes = walks.get(path);
+    if (prefixes) return prefixes;
+    prefixes = [];
+    let dir = path;
+    while (true) {
+      prefixes.push(dir);
+      if (!dir) break;
+      const nm = nmBoundary(dir);
+      dir = nm < 0 ? dir.slice(0, Math.max(0, dir.lastIndexOf('/')))
+        : nm === 0 ? '' : dir.slice(0, nm - 1);
+    }
+    walks.set(path, prefixes);
+    return prefixes;
+  };
+  function lookup(path, name) {
+    for (const dir of walk(path)) {
+      const id = byParent.get(dir)?.get(name);
+      if (id !== undefined) return id;
+    }
+    return null;
   }
   let missingOptional = 0;
   for (const [path, record] of records) {
@@ -247,7 +290,8 @@ function parseRequirements(text, source) {
   let start = 1;
   for (let i = 0; i < lines.length; i++) {
     if (!pending.length) start = i + 1;
-    const strip = lines[i].replace(/(^|\s+)#.*$/, '').trim();
+    const hashAt = lines[i].search(/(?:^|\s)#/);
+    const strip = (hashAt < 0 ? lines[i] : lines[i].slice(0, hashAt)).trim();
     const continuation = strip.endsWith('\\');
     pending.push(continuation ? strip.slice(0, -1) : strip);
     if (continuation) {
@@ -261,7 +305,18 @@ function parseRequirements(text, source) {
     const parts = /^(?<name>[\p{L}\p{N}][\p{L}\p{N}\p{M}._-]*)(?:\s*\[(?<extras>\s*[a-z0-9._-]+(?:\s*,\s*[a-z0-9._-]+)*\s*)\])?(?<rest>.*)$/iu.exec(line)?.groups;
     if (!parts) bad(`Unsupported requirements directive or entry on line ${start}.`);
     const name = packageName(parts.name, `requirements line ${start}`);
-    const fields = parts.rest.trim().split(/\s+(?=--)/);
+    // Split at each whitespace-preceded -- with an explicit scan: a
+    // lookahead-based split is quadratic on long space runs.
+    const rest = parts.rest.trim();
+    const fields = [];
+    let cut = 0;
+    for (const m of rest.matchAll(/--/g)) {
+      if (m.index > cut && /\s/.test(rest[m.index - 1])) {
+        fields.push(rest.slice(cut, m.index).trimEnd());
+        cut = m.index;
+      }
+    }
+    fields.push(rest.slice(cut));
     const raw = fields.shift() ?? '';
     const hashes = fields.map(option => {
       const match = /^--hash=sha(256|384|512):([a-fA-F0-9]+)$/.exec(option.trim());
@@ -434,8 +489,10 @@ const HASH_LENGTH = new Map([
   ['BLAKE2b-384', 96], ['BLAKE2b-512', 128], ['BLAKE3', 64],
 ]);
 
+/* The scheme is bounded so a long run of letters cannot feed the
+   backtracker: uncapped license strings reach this regex. */
 const cleanText = value => typeof value === 'string' ?
-  value.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^/@\s]+@/g, '$1[credentials omitted]@') : value;
+  value.replace(/([a-zA-Z][a-zA-Z0-9+.-]{0,31}:\/\/)[^/@\s]+@/g, '$1[credentials omitted]@') : value;
 
 function parseCyclone(doc, source) {
   if (doc.bomFormat !== 'CycloneDX' || doc.specVersion !== '1.5') bad('Only CycloneDX 1.5 JSON is supported.');
@@ -466,12 +523,28 @@ function parseCyclone(doc, source) {
       }
       return { alg: item.alg, content: item.content.toLowerCase() };
     });
+    /* License metadata is advisory only: a malformed entry must never sink
+       the whole import, so values are sanitized (lone surrogates replaced,
+       controls to space, whitespace runs collapsed) instead of run through
+       the strict validators. The FULL string is kept with no length cap:
+       the policy denylist matches on it, so truncating here would let a
+       denied id past the cut evade the gate; the input file itself is
+       already size-capped upstream, and collapsing whitespace keeps the
+       denylist tokenizer's space-delimited split linear. */
+    const soft = value => typeof value === 'string'
+      ? value.toWellFormed().replace(/[\u0000-\u001f\u007f]/gu, ' ').replace(/\s+/gu, ' ').trim() : '';
+    const licenses = (Array.isArray(record.licenses) ? record.licenses : []).map(item => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return '';
+      const license = item.license && typeof item.license === 'object' && !Array.isArray(item.license)
+        ? item.license : {};
+      return cleanText(soft(item.expression) || soft(license.id) || soft(license.name));
+    }).filter(Boolean);
     const id = isRoot ? model.rootId : ref ? `sbom:${ref}` : `sbom-inventory:${++count}`;
     const group = cleanText(optional(record.group, 'CycloneDX component group', 200));
     const details = {
       name: ecosystem === 'npm' && group.startsWith('@') && !name.startsWith('@') ? `${group}/${name}` : name,
       version: cleanText(optional(record.version, 'CycloneDX component version', 200)), ecosystem,
-      location: ref ? `bom-ref ${ref}` : 'CycloneDX component', purl, hashes, componentType: record.type,
+      location: ref ? `bom-ref ${ref}` : 'CycloneDX component', purl, hashes, licenses, componentType: record.type,
     };
     if (isRoot) Object.assign(byId.get(id), details);
     else node(id, details);

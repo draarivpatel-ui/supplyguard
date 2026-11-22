@@ -3,9 +3,13 @@ import { analyze, simulate } from './detectors.js';
 import { presets, loadPreset } from './presets.js';
 import { makeExport, sha256 } from './exports.js';
 import { renderGraph } from './viz.js';
+import { blastRadius, dependents, exposurePaths, policyGate, sanitizePolicy, DEFAULT_POLICY } from './policy.js';
+import { diffAnalyses } from './diff.js';
+import { decodeBookmark, encodeBookmark, makeAttestation, runSelfTests, verifyAttestation } from './attest.js';
 
 const SEV_RANK = { high: 0, medium: 1, low: 2 };
 const THEME_MODES = ['auto', 'light', 'dark'];
+const TAB_IDS = ['policy', 'diff', 'verify'];
 
 const state = {
   presetId: null,
@@ -23,6 +27,12 @@ const state = {
   inputFingerprint: null,
   shortcuts: false,
   theme: 'auto',
+  policy: { ...DEFAULT_POLICY, licenseDeny: [] },
+  gate: null,
+  tab: 'policy',
+  diff: { left: 'preset:baseline', right: 'preset:lifecycle', result: null, labels: null, error: '' },
+  selfTests: null,
+  attestCheck: null,
 };
 
 let generation = 0;
@@ -63,6 +73,16 @@ function depthOf(id) {
 
 /* ---------- model adoption ---------- */
 
+/* A stored diff computed against "current analysis" goes stale the moment
+   the model changes (scenario switch, import, staged change). */
+function dropStaleDiff() {
+  if (state.diff.left === 'current' || state.diff.right === 'current') {
+    state.diff.result = null;
+    state.diff.labels = null;
+    state.diff.error = '';
+  }
+}
+
 function adoptModel(model, meta) {
   let analysis;
   try {
@@ -85,6 +105,7 @@ function adoptModel(model, meta) {
   nodeById.clear();
   for (const n of model.nodes || []) nodeById.set(n.id, n);
   if (els.warnings && els.warnings.parentElement) els.warnings.parentElement.open = false;
+  dropStaleDiff();
   render();
   return true;
 }
@@ -170,6 +191,7 @@ function commitChanges(next, refocusSelector) {
   state.analysis = analysis;
   nodeById.clear();
   for (const n of model.nodes || []) nodeById.set(n.id, n);
+  dropStaleDiff();
   render();
   setStatus(
     next.size
@@ -247,6 +269,7 @@ function selectNode(id, opts) {
 /* ---------- render ---------- */
 
 function render() {
+  state.gate = state.analysis ? policyGate(state.analysis, state.policy) : null;
   renderScenarioStrip();
   renderStatusStrip();
   renderComponentSelect();
@@ -254,6 +277,10 @@ function render() {
   renderInspector();
   renderFindings();
   renderPrintBrief();
+  updatePolicyPanel();
+  renderDiffSources();
+  renderDiffResults();
+  syncBookmark();
 }
 
 function renderScenarioStrip() {
@@ -314,6 +341,12 @@ function renderStatusStrip() {
 
   const cmp = els.compare;
   cmp.textContent = '';
+  if (a && state.gate) {
+    cmp.append(
+      el('span', 'gate-chip g-' + state.gate.verdict.toLowerCase(), 'gate ' + state.gate.verdict),
+      document.createTextNode(state.changes.size ? ' ' : '')
+    );
+  }
   if (state.changes.size && state.baseAnalysis && a) {
     const b = state.baseAnalysis;
     const bm = b.metrics || {};
@@ -404,6 +437,7 @@ function renderInspector() {
   if (depthOf(node.id) == null) badges.append(el('span', 'badge b-warn', 'unreachable'));
   host.append(badges);
 
+  renderBlast(host, node);
   renderRemediation(host, node);
 
   host.append(el('h3', 'sub-title', 'Dependency path'));
@@ -575,6 +609,561 @@ function renderRemediation(host, node) {
   reset.disabled = !state.changes.size;
   reset.addEventListener('click', () => commitChanges(new Map(), '#reset-remediation'));
   host.append(reset);
+}
+
+/* ---------- blast radius preview ---------- */
+
+function chipList(host, items, limit = 14) {
+  const wrap = el('div', 'affected-list');
+  for (const item of items.slice(0, limit)) {
+    const b = el('button', null, item.name);
+    b.type = 'button';
+    b.addEventListener('click', () => selectNode(item.id));
+    wrap.append(b);
+  }
+  if (items.length > limit) wrap.append(el('span', 'dim', '+' + (items.length - limit) + ' more'));
+  host.append(wrap);
+}
+
+function renderBlast(host, node) {
+  if (node.root || node.id === (state.model && state.model.rootId)) return;
+  host.append(el('h3', 'sub-title', 'Blast radius'));
+  let view;
+  try {
+    const { direct, transitive } = dependents(state.model, node.id);
+    view = { direct, transitive, paths: exposurePaths(state.model, node.id, 65) };
+  } catch {
+    host.append(el('p', 'dim', 'Blast radius is not available for this component.'));
+    return;
+  }
+  if (node.quarantined) {
+    host.append(el('p', 'dim', 'This component is quarantined in the simulation, so it is not in the active graph.'));
+    return;
+  }
+  const dl = el('dl', 'blast-stats');
+  const stat = (key, value) => {
+    dl.append(el('dt', null, key));
+    dl.append(el('dd', null, String(value)));
+  };
+  stat('exposure paths', view.paths.length
+    ? (view.paths.length > 64 ? '64+' : view.paths.length) + ' · depth ' + (view.paths[0].length - 1)
+    : 'none');
+  stat('direct dependents', view.direct.length);
+  stat('transitive dependents', view.transitive.length);
+  host.append(dl);
+  if (view.direct.length) {
+    host.append(el('p', 'blast-label', 'Direct dependents'));
+    chipList(host, view.direct);
+  }
+  const directIds = new Set(view.direct.map(item => item.id));
+  const further = view.transitive.filter(item => !directIds.has(item.id));
+  if (further.length) {
+    host.append(el('p', 'blast-label', 'Further transitive dependents'));
+    chipList(host, further);
+  }
+  const btn = el('button', 'rem-btn', 'Preview quarantine');
+  btn.type = 'button';
+  btn.id = 'blast-preview';
+  const resultBox = el('div', 'blast-result');
+  btn.addEventListener('click', () => {
+    clear(resultBox);
+    try {
+      renderBlastReport(resultBox, blastRadius(state.model, node.id));
+    } catch (err) {
+      resultBox.append(el('p', 'dim', err.message));
+    }
+  });
+  host.append(btn);
+  host.append(resultBox);
+}
+
+function renderBlastReport(host, report) {
+  const sum = el('p', 'blast-delta');
+  sum.append(
+    document.createTextNode('quarantine ' + report.name + ': score '),
+    el('strong', null, report.score.before + ' \u2192 ' + report.score.after),
+    document.createTextNode(' · ' + report.findings.cleared + ' contributing finding' +
+      (report.findings.cleared === 1 ? '' : 's') + ' cleared · ' +
+      report.orphaned.length + ' orphaned')
+  );
+  host.append(sum);
+  if (report.cleared.length) {
+    const list = el('ul', 'contrib');
+    for (const item of report.cleared.slice(0, 10)) {
+      const li = el('li');
+      li.append(el('span', 'rule', item.ruleId + ' ' + item.title));
+      li.append(el('span', 'pts', item.severity));
+      list.append(li);
+    }
+    if (report.cleared.length > 10) list.append(el('li', null, '+' + (report.cleared.length - 10) + ' more'));
+    host.append(list);
+  }
+  if (report.orphaned.length) {
+    host.append(el('p', 'blast-label', 'Becomes unreachable'));
+    chipList(host, report.orphaned);
+  }
+  host.append(el('p', 'dim', 'Preview only. Stage the change under Remediation to apply it.'));
+}
+
+/* ---------- workbench: policy gate, lockfile diff, verify ---------- */
+
+function activateTab(id) {
+  state.tab = TAB_IDS.includes(id) ? id : 'policy';
+  for (const tabId of TAB_IDS) {
+    const btn = document.getElementById('tab-' + tabId);
+    const panel = document.getElementById('panel-' + tabId);
+    const active = tabId === state.tab;
+    btn.setAttribute('aria-selected', String(active));
+    btn.tabIndex = active ? 0 : -1;
+    panel.hidden = !active;
+  }
+  syncBookmark();
+}
+
+function gateControl(id) {
+  return els.panelPolicy.querySelector('tr[data-check="' + id + '"] .gate-control');
+}
+
+function levelSelect(value, levels, onChange) {
+  const sel = document.createElement('select');
+  sel.className = 'gate-select';
+  for (const level of levels) {
+    const opt = el('option', null, level);
+    opt.value = level;
+    sel.append(opt);
+  }
+  sel.value = value;
+  sel.addEventListener('change', () => onChange(sel.value));
+  return sel;
+}
+
+function numberInput(value, onChange) {
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'gate-num mono';
+  input.inputMode = 'numeric';
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  input.value = String(value);
+  input.setAttribute('aria-label', 'allowed count before the rule triggers');
+  input.addEventListener('change', () => {
+    const parsed = /^\d{1,6}$/.test(input.value.trim()) ? Number(input.value.trim()) : 0;
+    input.value = String(parsed);
+    onChange(parsed);
+  });
+  return input;
+}
+
+function setPolicy(key, value) {
+  state.policy[key] = value;
+  state.policy = sanitizePolicy(state.policy);
+  state.gate = state.analysis ? policyGate(state.analysis, state.policy) : null;
+  updatePolicyPanel();
+  renderStatusStrip();
+  syncBookmark();
+}
+
+function buildPolicyPanel() {
+  const host = els.panelPolicy;
+  clear(host);
+  host.dataset.built = '1';
+  host.append(el('h2', null, 'Policy gate'));
+  const head = el('div', 'gate-head');
+  head.append(el('span', 'gate-verdict', 'n/a'));
+  head.append(el('p', 'dim', 'A deterministic CI/CD gate replayed offline. Only findings reachable from the root count. No advisory feed or registry is consulted.'));
+  host.append(head);
+  const table = el('table', 'gate-table');
+  const tbody = el('tbody');
+  for (const [id, label] of [
+    ['install-scripts', 'Install lifecycle hooks'],
+    ['typosquat', 'Lookalike names over ceiling'],
+    ['unpinned', 'Unpinned declarations over ceiling'],
+    ['severity-ceiling', 'Severity ceiling'],
+    ['license-deny', 'License denylist'],
+  ]) {
+    const tr = el('tr');
+    tr.dataset.check = id;
+    tr.append(el('td', 'gate-label', label));
+    tr.append(el('td', 'gate-control'));
+    tr.append(el('td', 'gate-state'));
+    tr.append(el('td', 'gate-detail dim'));
+    tbody.append(tr);
+  }
+  table.append(tbody);
+  host.append(table);
+
+  const policy = state.policy;
+  gateControl('install-scripts').append(levelSelect(policy.installScripts, ['off', 'warn', 'block'], value => {
+    setPolicy('installScripts', value);
+  }));
+  const typoCell = gateControl('typosquat');
+  typoCell.append(levelSelect(policy.typosquat, ['off', 'warn', 'block'], value => setPolicy('typosquat', value)));
+  typoCell.append(document.createTextNode(' max '));
+  typoCell.append(numberInput(policy.typosquatMax, value => setPolicy('typosquatMax', value)));
+  const unpinnedCell = gateControl('unpinned');
+  unpinnedCell.append(levelSelect(policy.unpinned, ['off', 'warn', 'block'], value => setPolicy('unpinned', value)));
+  unpinnedCell.append(document.createTextNode(' max '));
+  unpinnedCell.append(numberInput(policy.unpinnedMax, value => setPolicy('unpinnedMax', value)));
+  gateControl('severity-ceiling').append(levelSelect(policy.severityCeiling, ['off', 'high', 'medium', 'low'], value => {
+    setPolicy('severityCeiling', value);
+  }));
+  const deny = document.createElement('input');
+  deny.type = 'text';
+  deny.id = 'gate-license-deny';
+  deny.className = 'gate-licenses mono';
+  deny.autocomplete = 'off';
+  deny.spellcheck = false;
+  deny.placeholder = 'GPL-3.0-only, AGPL-3.0-only';
+  deny.value = policy.licenseDeny.join(', ');
+  deny.addEventListener('change', () => {
+    setPolicy('licenseDeny', deny.value.split(',').map(item => item.trim()).filter(Boolean));
+    deny.value = state.policy.licenseDeny.join(', ');
+  });
+  gateControl('license-deny').append(deny);
+}
+
+function syncPolicyControls() {
+  const host = els.panelPolicy;
+  if (!host || !host.dataset.built) return;
+  const rows = [
+    ['install-scripts', state.policy.installScripts, 0],
+    ['typosquat', state.policy.typosquat, 0], ['typosquat', state.policy.typosquatMax, 1],
+    ['unpinned', state.policy.unpinned, 0], ['unpinned', state.policy.unpinnedMax, 1],
+    ['severity-ceiling', state.policy.severityCeiling, 0],
+  ];
+  for (const [id, value, index] of rows) {
+    const widget = gateControl(id).querySelectorAll('select,input')[index];
+    if (widget) widget.value = String(value);
+  }
+  const deny = host.querySelector('#gate-license-deny');
+  if (deny) deny.value = state.policy.licenseDeny.join(', ');
+}
+
+function updatePolicyPanel() {
+  const host = els.panelPolicy;
+  if (!host || !host.dataset.built) return;
+  const badge = host.querySelector('.gate-verdict');
+  const gate = state.gate;
+  if (!gate) {
+    badge.textContent = 'n/a';
+    badge.dataset.verdict = 'none';
+    for (const tr of host.querySelectorAll('tr[data-check]')) {
+      tr.querySelector('.gate-state').textContent = '';
+      tr.querySelector('.gate-detail').textContent = 'load an input to evaluate';
+    }
+    return;
+  }
+  badge.textContent = gate.verdict;
+  badge.dataset.verdict = gate.verdict.toLowerCase();
+  for (const check of gate.checks) {
+    const tr = host.querySelector('tr[data-check="' + check.id + '"]');
+    const stateCell = tr.querySelector('.gate-state');
+    stateCell.textContent = check.triggered ? check.level.toUpperCase() : 'pass';
+    stateCell.className = 'gate-state gs-' + (check.triggered ? check.level : 'pass');
+    let detail = check.detail;
+    if (check.id === 'license-deny') {
+      detail += ' · ' + check.coverage.recorded + ' licensed component' + (check.coverage.recorded === 1 ? '' : 's');
+    }
+    tr.querySelector('.gate-detail').textContent = detail;
+  }
+  syncPolicyControls();
+}
+
+/* ---------- lockfile diff ---------- */
+
+function diffSources() {
+  const list = [['', 'choose a source']];
+  if (state.model) list.push(['current', 'Current analysis']);
+  for (const preset of presets || []) list.push(['preset:' + preset.id, 'Scenario ' + preset.title + ' (synthetic)']);
+  return list;
+}
+
+function buildDiffPanel() {
+  const host = els.panelDiff;
+  clear(host);
+  host.dataset.built = '1';
+  host.append(el('h2', null, 'Lockfile diff'));
+  host.append(el('p', 'dim', 'Compare two inventories from local data only: scenarios, the current analysis, or pasted text. Pasted content stays in this tab and is not stored in the bookmark link.'));
+  const grid = el('div', 'diff-grid');
+  for (const [side, sideLabel] of [['left', 'Before'], ['right', 'After']]) {
+    const box = el('div', 'diff-side');
+    const label = el('label', 'diff-label', sideLabel);
+    const sel = document.createElement('select');
+    sel.id = 'diff-' + side;
+    label.append(sel);
+    box.append(label);
+    const area = document.createElement('textarea');
+    area.id = 'diff-' + side + '-text';
+    area.rows = 5;
+    area.spellcheck = false;
+    area.placeholder = 'or paste a lockfile, requirements list, Cargo.lock, or CycloneDX JSON';
+    area.setAttribute('aria-label', sideLabel + ' pasted inventory');
+    box.append(area);
+    grid.append(box);
+  }
+  host.append(grid);
+  const actions = el('div', 'diff-actions');
+  const run = el('button', 'rem-btn', 'Compare');
+  run.type = 'button';
+  run.id = 'diff-run';
+  run.addEventListener('click', runDiff);
+  const swap = el('button', 'rem-btn', 'Swap sides');
+  swap.type = 'button';
+  swap.id = 'diff-swap';
+  swap.addEventListener('click', () => {
+    [state.diff.left, state.diff.right] = [state.diff.right, state.diff.left];
+    [els.diffLeftText.value, els.diffRightText.value] = [els.diffRightText.value, els.diffLeftText.value];
+    state.diff.result = null;
+    state.diff.labels = null;
+    state.diff.error = '';
+    renderDiffSources();
+    renderDiffResults();
+    syncBookmark();
+  });
+  actions.append(run, swap);
+  host.append(actions);
+  const results = el('div', 'diff-results');
+  host.append(results);
+  els.diffLeft = host.querySelector('#diff-left');
+  els.diffRight = host.querySelector('#diff-right');
+  els.diffLeftText = host.querySelector('#diff-left-text');
+  els.diffRightText = host.querySelector('#diff-right-text');
+  for (const [side, sel] of [['left', els.diffLeft], ['right', els.diffRight]]) {
+    sel.addEventListener('change', () => {
+      state.diff[side] = sel.value;
+      state.diff.result = null;
+      state.diff.labels = null;
+      state.diff.error = '';
+      renderDiffResults();
+      syncBookmark();
+    });
+    const area = side === 'left' ? els.diffLeftText : els.diffRightText;
+    area.addEventListener('input', () => {
+      if (!state.diff.result && !state.diff.error) return;
+      state.diff.result = null;
+      state.diff.labels = null;
+      state.diff.error = '';
+      renderDiffResults();
+    });
+  }
+}
+
+function renderDiffSources() {
+  if (!els.diffLeft) return;
+  const options = diffSources();
+  for (const [side, sel] of [['left', els.diffLeft], ['right', els.diffRight]]) {
+    const wanted = state.diff[side];
+    clear(sel);
+    for (const [value, label] of options) {
+      const opt = el('option', null, label);
+      opt.value = value;
+      sel.append(opt);
+    }
+    sel.value = options.some(([value]) => value === wanted) ? wanted : 'preset:baseline';
+    state.diff[side] = sel.value;
+  }
+}
+
+function diffSideModel(side) {
+  const sel = side === 'left' ? els.diffLeft : els.diffRight;
+  const area = side === 'left' ? els.diffLeftText : els.diffRightText;
+  const pasted = area.value.trim();
+  if (pasted) {
+    // parseInput picks its parser from the file name, so name the paste by
+    // what it looks like: TOML tables mean Cargo.lock, everything else is
+    // routed by content (JSON wins on '{' inside parseInput itself).
+    const name = /^\s*\[\[package\]\]/m.test(pasted) ? 'pasted Cargo.lock' : 'pasted inventory';
+    return { model: parseInput(pasted, name), label: 'pasted input' };
+  }
+  if (sel.value === 'current') {
+    if (!state.model) throw new Error('No current analysis is loaded.');
+    return { model: state.model, label: 'current analysis' };
+  }
+  const preset = (presets || []).find(item => 'preset:' + item.id === sel.value);
+  if (!preset) throw new Error('Choose a source for the ' + side + ' side.');
+  return { model: loadPreset(preset.id), label: 'scenario ' + preset.title };
+}
+
+function runDiff() {
+  try {
+    const left = diffSideModel('left');
+    const right = diffSideModel('right');
+    state.diff.result = diffAnalyses(analyze(left.model), analyze(right.model));
+    state.diff.labels = { left: left.label, right: right.label };
+    state.diff.error = '';
+  } catch (err) {
+    state.diff.result = null;
+    state.diff.error = err.message;
+  }
+  renderDiffResults();
+}
+
+function diffGroup(host, title, rows, fill) {
+  const box = el('div', 'diff-group');
+  box.append(el('h3', null, title + ' (' + rows.length + ')'));
+  if (!rows.length) {
+    box.append(el('p', 'dim', 'none'));
+    host.append(box);
+    return;
+  }
+  const table = el('table', 'diff-table');
+  const tbody = el('tbody');
+  for (const row of rows) {
+    const tr = el('tr');
+    fill(tr, row);
+    tbody.append(tr);
+  }
+  table.append(tbody);
+  box.append(table);
+  host.append(box);
+}
+
+const DIRECTION_MARK = { upgraded: ['\u2191', 'dd-up'], downgraded: ['\u2193', 'dd-down'], equivalent: ['=', 'dd-mix'], pinned: ['●', 'dd-up'], unpinned: ['○', 'dd-down'], mixed: ['~', 'dd-mix'], expanded: ['+', 'dd-add'], reduced: ['-', 'dd-rem'] };
+
+function renderDiffResults() {
+  const host = els.panelDiff?.querySelector('.diff-results');
+  if (!host) return;
+  clear(host);
+  if (state.diff.error) {
+    host.append(el('p', 'dim', 'Diff failed: ' + state.diff.error));
+    return;
+  }
+  const d = state.diff.result;
+  if (!d) {
+    host.append(el('p', 'dim', 'Pick a before and after source, or paste inventories, then run Compare.'));
+    return;
+  }
+  const labels = state.diff.labels;
+  const signed = value => (value > 0 ? '+' : '') + value;
+  const sum = el('p', 'diff-sum');
+  sum.append(
+    el('strong', null, labels.left + ' \u2192 ' + labels.right),
+    document.createTextNode(' · net risk delta ' + signed(d.score.delta)),
+    document.createTextNode(' · score ' + d.score.before + ' \u2192 ' + d.score.after),
+    document.createTextNode(' · findings ' + d.findings.before + ' \u2192 ' + d.findings.after),
+    document.createTextNode(' · reachable ' + d.reachable.before + ' \u2192 ' + d.reachable.after),
+    document.createTextNode(' · affected ' + d.affected.before + ' \u2192 ' + d.affected.after)
+  );
+  host.append(sum);
+  diffGroup(host, 'Added', d.added, (tr, item) => {
+    tr.append(el('td', 'dd-mark dd-add', '+'), el('td', null, item.name),
+      el('td', 'mono', item.versions.join(', ') || 'unversioned'), el('td', 'dim', item.ecosystem));
+  });
+  diffGroup(host, 'Removed', d.removed, (tr, item) => {
+    tr.append(el('td', 'dd-mark dd-rem', '-'), el('td', null, item.name),
+      el('td', 'mono', item.versions.join(', ') || 'unversioned'), el('td', 'dim', item.ecosystem));
+  });
+  diffGroup(host, 'Changed', d.changed, (tr, item) => {
+    const [mark, cls] = DIRECTION_MARK[item.direction] || DIRECTION_MARK.mixed;
+    const label = versions => versions.map(v => v || 'unversioned').join(', ');
+    tr.append(el('td', 'dd-mark ' + cls, mark), el('td', null, item.name),
+      el('td', 'mono', label(item.from) + ' \u2192 ' + label(item.to)),
+      el('td', 'dim', item.direction + ' · ' + item.ecosystem));
+  });
+  diffGroup(host, 'Newly introduced risk signals', d.signals.introduced, (tr, item) => {
+    const td = el('td');
+    td.append(el('span', 'sev sev-' + item.severity, item.severity));
+    tr.append(el('td', 'dd-mark dd-rem', '!'), td, el('td', null, item.name),
+      el('td', null, item.ruleId + ' · ' + item.title));
+  });
+  diffGroup(host, 'Resolved signals', d.signals.resolved, (tr, item) => {
+    const td = el('td');
+    td.append(el('span', 'sev sev-' + item.severity, item.severity));
+    tr.append(el('td', 'dd-mark dd-add', '\u2713'), td, el('td', null, item.name),
+      el('td', null, item.ruleId + ' · ' + item.title));
+  });
+}
+
+/* ---------- verify panel ---------- */
+
+function buildVerifyPanel() {
+  const host = els.panelVerify;
+  clear(host);
+  host.append(el('h2', null, 'Verify'));
+  host.append(el('p', 'dim', 'Replay the engine proofs in this page. Every check runs offline against deterministic synthetic input.'));
+  const run = el('button', 'rem-btn', 'Run self-tests');
+  run.type = 'button';
+  run.id = 'run-selftests';
+  run.addEventListener('click', runSelfTestPanel);
+  host.append(run);
+  host.append(el('p', 'st-count'));
+  const list = el('ol', 'selftest-list');
+  host.append(list);
+  host.append(el('h3', 'sub-title', 'Attestation check'));
+  host.append(el('p', 'dim', 'Paste an attestation export to recompute its SHA-256 digest and detect alteration or corruption. The digest is not a signature: only a digest kept separately proves a payload is unaltered.'));
+  const area = document.createElement('textarea');
+  area.id = 'attest-input';
+  area.rows = 6;
+  area.spellcheck = false;
+  area.placeholder = '{... supplyguard.attestation.json ...}';
+  area.setAttribute('aria-label', 'attestation export to verify');
+  host.append(area);
+  const check = el('button', 'rem-btn', 'Verify attestation');
+  check.type = 'button';
+  check.id = 'verify-attest';
+  check.addEventListener('click', runAttestCheck);
+  host.append(check);
+  host.append(el('p', 'attest-result'));
+}
+
+function runSelfTestPanel() {
+  state.selfTests = runSelfTests();
+  const host = els.panelVerify;
+  const list = host.querySelector('.selftest-list');
+  const count = host.querySelector('.st-count');
+  clear(list);
+  let passed = 0;
+  for (const item of state.selfTests) {
+    if (item.ok) passed++;
+    const li = el('li');
+    li.append(el('span', 'st ' + (item.ok ? 'st-ok' : 'st-fail'), item.ok ? 'pass' : 'fail'));
+    li.append(document.createTextNode(' '));
+    li.append(el('span', 'st-name', item.name));
+    li.append(document.createTextNode(' '));
+    li.append(el('span', 'dim mono', item.detail));
+    list.append(li);
+  }
+  count.textContent = passed + ' of ' + state.selfTests.length + ' self-tests pass';
+  count.className = 'st-count ' + (passed === state.selfTests.length ? 'st-ok-text' : 'st-fail-text');
+}
+
+function runAttestCheck() {
+  const input = els.panelVerify.querySelector('#attest-input');
+  const out = els.panelVerify.querySelector('.attest-result');
+  const result = verifyAttestation(input.value);
+  state.attestCheck = result;
+  if (result.ok) {
+    out.textContent = 'verified · gate ' + (result.verdict || 'n/a') + ' · sha256 ' + result.computed.slice(0, 20) + '\u2026';
+    out.className = 'attest-result st-ok-text';
+  } else {
+    out.textContent = 'not verified: ' + (result.error || 'digest mismatch; the payload was altered or corrupted');
+    out.className = 'attest-result st-fail-text';
+  }
+}
+
+/* ---------- bookmark ---------- */
+
+function syncBookmark() {
+  try {
+    // Only preset scenarios restore deterministically; imported file content
+    // and its staged changes can never be rebuilt from a link.
+    const fromPreset = state.inputKind === 'preset';
+    const encoded = encodeBookmark({
+      presetId: fromPreset ? state.presetId : null,
+      changes: fromPreset ? state.changes : null,
+      policy: state.policy,
+      tab: state.tab,
+      diff: { left: state.diff.left, right: state.diff.right },
+    });
+    if (encoded) {
+      history.replaceState(null, '', '#' + encoded);
+      state.bookmarkTooLarge = false;
+    } else {
+      history.replaceState(null, '', location.pathname + location.search);
+      state.bookmarkTooLarge = true;
+    }
+    return Boolean(encoded);
+  } catch (_) { return false; }
 }
 
 /* ---------- findings table ---------- */
@@ -749,6 +1338,18 @@ function renderPrintBrief() {
 
 /* ---------- exports ---------- */
 
+function downloadText(text, filename, mime) {
+  const blob = new Blob([text], { type: mime || 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename || 'supplyguard-export.txt';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 async function onExport(kind) {
   const analysis = state.analysis;
   if (!analysis) {
@@ -758,21 +1359,27 @@ async function onExport(kind) {
   const fingerprint = state.inputFingerprint;
   const changes = new Map(state.changes);
   try {
+    if (kind === 'sign') {
+      setStatus('Preparing attestation…');
+      const result = makeAttestation(analysis, {
+        inputFingerprint: await fingerprint,
+        changes,
+        policy: state.policy,
+      });
+      if (analysis !== state.analysis) return;
+      downloadText(result.text, result.filename, result.mime);
+      setStatus('Exported ' + result.filename + ' · gate ' + result.verdict + ' · sha256 ' + result.digest.slice(0, 20) + '…');
+      return;
+    }
     setStatus('Preparing ' + kind + ' export…');
     const result = await makeExport(kind, analysis, {
       inputFingerprint: await fingerprint,
       changes,
+      gate: state.gate ? state.gate.verdict : null,
     });
-    const blob = new Blob([result.text], { type: result.mime || 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = result.filename || 'supplyguard-' + kind + '.txt';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    if (analysis === state.analysis) setStatus('Exported ' + (result.filename || kind) + '.');
+    if (analysis !== state.analysis) return;
+    downloadText(result.text, result.filename, result.mime);
+    setStatus('Exported ' + (result.filename || kind) + '.');
   } catch (err) {
     if (analysis === state.analysis) setStatus('Export failed: ' + err.message, true);
   }
@@ -856,8 +1463,15 @@ function init() {
   els.shortcutHint = document.getElementById('shortcut-hint');
   els.dropZone = document.getElementById('drop-zone');
   els.fileInput = document.getElementById('file-input');
+  els.panelPolicy = document.getElementById('panel-policy');
+  els.panelDiff = document.getElementById('panel-diff');
+  els.panelVerify = document.getElementById('panel-verify');
+  els.bookmarkBtn = document.getElementById('bookmark-button');
 
   buildScenarioButtons();
+  buildPolicyPanel();
+  buildDiffPanel();
+  buildVerifyPanel();
 
   els.fileInput.addEventListener('change', () => {
     handleFile(els.fileInput.files && els.fileInput.files[0]);
@@ -902,6 +1516,38 @@ function init() {
     b.addEventListener('click', () => onExport(b.dataset.export));
   }
   document.getElementById('print-button').addEventListener('click', () => window.print());
+  els.bookmarkBtn.addEventListener('click', async () => {
+    const ok = syncBookmark();
+    if (!ok || state.bookmarkTooLarge) {
+      setStatus('This state is too large to store in a bookmark link.', true);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(location.href);
+      setStatus(state.inputKind === 'preset'
+        ? 'Bookmark link copied. It restores this scenario, staged changes, policy, and view.'
+        : 'Bookmark link copied. It restores policy and view; imported file content is not stored in links.');
+    } catch {
+      setStatus('Bookmark link is in the address bar; copy it from there.');
+    }
+  });
+
+  const tabs = TAB_IDS.map(id => document.getElementById('tab-' + id));
+  for (const [index, tab] of tabs.entries()) {
+    tab.addEventListener('click', () => activateTab(TAB_IDS[index]));
+    tab.addEventListener('keydown', e => {
+      let next = null;
+      if (e.key === 'ArrowRight') next = (index + 1) % tabs.length;
+      else if (e.key === 'ArrowLeft') next = (index - 1 + tabs.length) % tabs.length;
+      else if (e.key === 'Home') next = 0;
+      else if (e.key === 'End') next = tabs.length - 1;
+      if (next != null) {
+        e.preventDefault();
+        activateTab(TAB_IDS[next]);
+        tabs[next].focus();
+      }
+    });
+  }
 
   els.themeToggle.addEventListener('click', () => {
     const next = THEME_MODES[(THEME_MODES.indexOf(state.theme) + 1) % THEME_MODES.length];
@@ -932,12 +1578,48 @@ function init() {
   setShortcuts(storedShortcuts === 'on');
   document.addEventListener('keydown', onKeydown);
 
-  if ((presets || []).length) {
-    loadScenario(presets[0].id);
-  } else {
-    render();
-    setStatus('Scenario presets are not available yet.');
+  function applyBookmark(bookmark, { initial } = {}) {
+    // On a live restore, fields the encoder omitted are defaults: reset
+    // them so the page shows exactly the state the link describes.
+    if (bookmark.policy || !initial) {
+      state.policy = sanitizePolicy(bookmark.policy ?? DEFAULT_POLICY);
+      syncPolicyControls();
+    }
+    if (bookmark.diff) {
+      state.diff.left = bookmark.diff.left;
+      state.diff.right = bookmark.diff.right;
+    } else if (!initial) {
+      state.diff.left = '';
+      state.diff.right = '';
+    }
+    if (bookmark.diff || !initial) {
+      state.diff.result = null;
+      state.diff.labels = null;
+      state.diff.error = '';
+    }
+    if (!initial) {
+      // Pasted text outranks the pickers, so a live restore must drop it or
+      // the restored selection is silently ignored.
+      if (els.diffLeftText) els.diffLeftText.value = '';
+      if (els.diffRightText) els.diffRightText.value = '';
+    }
+    const wanted = bookmark.presetId && (presets || []).some(p => p.id === bookmark.presetId)
+      ? bookmark.presetId
+      : (initial ? (presets || [])[0]?.id : null);
+    if (wanted) loadScenario(wanted);
+    else if (initial) { render(); setStatus('Scenario presets are not available yet.'); }
+    else render();
+    if (bookmark.changes && bookmark.changes.size) commitChanges(bookmark.changes);
+    else if (!initial && state.changes.size) commitChanges(new Map());
+    activateTab(bookmark.tab ?? (initial ? null : 'policy'));
   }
+  const bookmark = decodeBookmark(location.hash);
+  if (bookmark) applyBookmark(bookmark, { initial: true });
+  else applyBookmark({ }, { initial: true });
+  window.addEventListener('hashchange', () => {
+    const next = decodeBookmark(location.hash);
+    if (next) applyBookmark(next);
+  });
 }
 
 init();
