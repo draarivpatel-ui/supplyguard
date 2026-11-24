@@ -8,4 +8,4 @@ Quarantine the component and the simulation rewrites the graph. The highlighted 
 
 Reset restores the baseline. In Lookalike names, a lodash spelled with a Cyrillic o trips the Unicode confusable rule at high severity. recat and axips sit one edit away from react and axios and trip the edit-distance rule instead. Same findings table, two different telltale signals.
 
-The workbench is verified end to end, deterministic and offline. 280 Node tests pass, and 10 of 10 report samples validate against the official SARIF 2.1.0 and CycloneDX 1.5 schemas. Export the audit JSON. Then open the executive brief for the one-page summary. SupplyGuard puts the risk in the graph, not in a guess.
+The workbench is verified end to end, deterministic and offline. 547 Node tests pass, and 10 of 10 report samples validate against the official SARIF 2.1.0 and CycloneDX 1.5 schemas. Export the audit JSON. Then open the executive brief for the one-page summary. SupplyGuard puts the risk in the graph, not in a guess.
