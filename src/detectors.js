@@ -279,7 +279,9 @@ export function simulate(original, changes) {
   const byId = new Map((Array.isArray(original.nodes) ? original.nodes : []).map(node => [node.id, node]));
   const pins = new Map();
   const nodes = new Map();
+  let changeCount = 0;
   for (const [id, change] of changes) {
+    changeCount += 1;
     const node = byId.get(id);
     if (!node || node.root || !['pin', 'upgrade', 'quarantine'].includes(change?.action)) throw new Error('Invalid remediation target or action.');
     if (change.action === 'quarantine') { nodes.set(id, { ...node, quarantined: true }); continue; }
@@ -311,7 +313,7 @@ export function simulate(original, changes) {
     }),
     notes: [
       ...original.notes,
-      ...(changes.size ? ['Counterfactual only. No manifest, resolver, package, or artifact was changed.'] : []),
+      ...(changeCount ? ['Counterfactual only. No manifest, resolver, package, or artifact was changed.'] : []),
       ...([...nodes.values()].some(node => node.simulatedArtifact) ?
         ['Candidate versions lack verified hook and dependency metadata. Cleared rules reflect missing evidence, not safety. Prior topology and source are retained for comparison.'] : []),
     ],

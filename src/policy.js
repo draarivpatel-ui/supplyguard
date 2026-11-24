@@ -49,7 +49,9 @@ function activeIndex(model) {
   const edges = (Array.isArray(model?.edges) ? model.edges : [])
     .filter(edge => ids.has(edge.from) && ids.has(edge.to))
     .filter(edge => {
-      const key = edge.from + '→' + edge.to;
+      // Node ids can come from SBOM bom-ref strings and may contain '→'.
+      // Key the pair losslessly so two distinct edges cannot collapse.
+      const key = JSON.stringify([edge.from, edge.to]);
       if (seen.has(key)) return false;
       seen.add(key);
       return true;

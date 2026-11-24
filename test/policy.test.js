@@ -587,3 +587,31 @@ test('CycloneDX keeps license data through export-facing model fields', () => {
   const node = parsed.nodes.find(item => item.name === 'a');
   assert.ok(Array.isArray(node.licenses) && node.licenses.length === 1);
 });
+
+/* ---------- L496 hardening regressions ---------- */
+
+test('exposure paths: arrow glyphs inside SBOM ids cannot collapse distinct edges', () => {
+  const ids = ['x→y', 'z', 'x', 'y→z'];
+  const model = hand(ids, [
+    ['root', 'x→y'], ['x→y', 'z'],
+    ['root', 'x'], ['x', 'y→z'],
+  ]);
+  assert.deepEqual(exposurePaths(model, 'z'), [['root', 'x→y', 'z']]);
+  assert.deepEqual(exposurePaths(model, 'y→z'), [['root', 'x', 'y→z']]);
+});
+
+test('simulate: generator change sets still carry the counterfactual provenance note', () => {
+  const model = hand(['a'], [['root', 'a']]);
+  function* changes() {
+    yield ['a', { action: 'quarantine' }];
+  }
+  const simulated = simulate(model, changes());
+  assert.ok(simulated.notes.some(note => note.startsWith('Counterfactual only.')));
+});
+
+test('accessibility contract: skip link lands on the main landmark', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const html = await readFile(new URL('../index.html', import.meta.url), 'utf8');
+  assert.match(html, /<a class="skip" href="#main-content">/);
+  assert.match(html, /<main id="main-content"/);
+});
