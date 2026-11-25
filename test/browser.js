@@ -200,7 +200,7 @@ try {
         'theme cycle is not announced as a binary toggle');
       assert.match(await dom('[data-preset="lifecycle"]', 'el => el.getAttribute("aria-label")'), /install-hook/);
       await evaluate('document.querySelector(".skip").click()');
-      assert.equal(await evaluate('document.activeElement.id'), 'findings-heading', 'skip link lands focus');
+      assert.equal(await evaluate('document.activeElement.id'), 'main-content', 'skip link lands focus');
       await evaluate('const sel = document.querySelector("#component-select"); sel.value = ""; sel.dispatchEvent(new Event("change"))');
       assert.equal(await evaluate('document.querySelectorAll("#graph svg .selected").length'), 0,
         'placeholder option clears the selection');

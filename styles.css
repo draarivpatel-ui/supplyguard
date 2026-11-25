@@ -788,7 +788,8 @@ input[type="text"], select{
   .scenario-file{ display: none; }
   .topbar{ padding: 10px 12px; }
   .graph-scroll{ max-height: 420px; }
-  .exports{ order: 3; }
+  .exports{ order: 3; flex-wrap: wrap; gap: 6px; border: 0; overflow: visible; }
+  .exports button, .exports button:last-child{ border: 1px solid var(--line-strong); border-radius: 6px; }
   .tab-bar [role="tab"]{ padding: 6px 8px; font-size: 0.85rem; }
   .gate-table td{ padding: 6px 6px 6px 0; }
   .gate-label{ white-space: normal; }
