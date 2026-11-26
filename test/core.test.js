@@ -567,7 +567,13 @@ test('npm import: many missing optional deps on a deep path stay fast', () => {
   const start = Date.now();
   const parsed = lock(npm({ '': {}, [deep]: { version: '1.0.0', optionalDependencies: optional } }));
   assert.ok(parsed.nodes.length >= 2);
-  assert.ok(Date.now() - start < 1000, 'deep optional-dep import took ' + (Date.now() - start) + 'ms');
+  // Guards against a superlinear path-resolution regression, not micro speed:
+  // the linear path finishes in well under a second here, while a quadratic
+  // blowup over fifty thousand optional deps runs for minutes. The ceiling is
+  // deliberately generous so a loaded or coverage-instrumented machine cannot
+  // flake the suite while a real blowup still trips it.
+  const elapsed = Date.now() - start;
+  assert.ok(elapsed < 5000, 'deep optional-dep import took ' + elapsed + 'ms');
 });
 
 test('npm import: sibling prefixes do not shadow when a folder has no parent slash', () => {
