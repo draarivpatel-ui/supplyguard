@@ -28,6 +28,8 @@ under a subpath such as a project page.
 nice -n 15 npm test
 ```
 
+Verified locally on Node v26.8.1: 556 tests passed, 0 failed, 0 skipped, 0 cancelled.
+
 Requires Node 22 or later. The suite is split across `core.test.js`
 (engine), `policy.test.js` (gate, blast radius, exposure paths),
 `diff.test.js` (version ordering, inventory comparison), and

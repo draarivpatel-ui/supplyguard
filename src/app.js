@@ -813,6 +813,7 @@ function buildPolicyPanel() {
   deny.className = 'gate-licenses mono';
   deny.autocomplete = 'off';
   deny.spellcheck = false;
+  deny.setAttribute('aria-label', 'License denylist');
   deny.placeholder = 'GPL-3.0-only, AGPL-3.0-only';
   deny.value = policy.licenseDeny.join(', ');
   deny.addEventListener('change', () => {
